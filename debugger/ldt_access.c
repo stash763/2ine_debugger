@@ -4,6 +4,7 @@
  * Please see the file LICENSE.txt in the source's root directory.
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include "ldt_access.h"
 #include <stdio.h>
 #include <stdlib.h>

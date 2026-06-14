@@ -566,8 +566,7 @@ void handleDebuggerCommand(void)
         g_debug.ran_resume_cmd = 1;
     }
     else if (strcmp(cmd, "p") == 0 || strcmp(cmd, "next") == 0 || strcmp(cmd, "over") == 0) {
-        int is_16bit = !g_debug.is_lx_mode;
-        int result = doStepOver();
+        doStepOver();
         int wait_result = wait_for_trap(g_debug.pid);
         if (wait_result != 0) {
             fprintf(stderr, "Step-over failed (wait returned %d)\n", wait_result);
