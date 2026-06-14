@@ -1,39 +1,3 @@
-# 2ine-debugger
-
-This fork adds a debugger styled after turbo debugger for OS/2 executables, definitely a work in progress.
-
-usage:
-
-td2ine ../tests/hello16.exe
-
-
-
-# 2ine
-
-*What is this?*
-
-It's a program that loads and runs OS/2 .exe files on Linux.
-
-*Does it work?*
-
-Barely. It runs some command line OS/2 apps.
-
-*Why?*
-
-Because.
-
-*Does it work on Mac OS X?*
-
-No.
-
-*I have questions.*
-
-I have answers: icculus@icculus.org
-
---ryan.
-
----
-
 ## 2ine Debugger Fork
 
 This fork adds a Turbo Debugger-compatible TUI debugger for OS/2 programs running on 2ine.
@@ -71,4 +35,30 @@ git submodule update --init
 For complete build instructions and debugging information, see [BUILD_NOTES.md](BUILD_NOTES.md).
 
 *AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
+
+# 2ine
+
+*What is this?*
+
+It's a program that loads and runs OS/2 .exe files on Linux.
+
+*Does it work?*
+
+Barely. It runs some command line OS/2 apps.
+
+*Why?*
+
+Because.
+
+*Does it work on Mac OS X?*
+
+No.
+
+*I have questions.*
+
+I have answers: icculus@icculus.org
+
+--ryan.
+
+---
 
