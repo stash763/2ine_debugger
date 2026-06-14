@@ -71,15 +71,32 @@ elseif(CURSES_HAVE_NCURSES_CURSES_H)
     add_definitions(-DHAVE_NCURSESW_NCURSES_H)
 endif()
 
-# !!! FIXME
-include_directories("/usr/local/include/SDL2")
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED sdl2)
+include_directories(${SDL2_INCLUDE_DIRS})
+
+# Capstone is vendored in capstone/ directory
+set(CAPSTONE_BUILD_STATIC ON CACHE BOOL "Build Capstone as static library")
+set(CAPSTONE_X86_SUPPORT ON CACHE BOOL "Enable x86 disassembly")
+add_subdirectory(capstone)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
+
+option(BUILD_DEBUGGER "Build Turbo Debugger for 2ine" TRUE)
 
 add_library(2ine SHARED "lib2ine.c")
+target_link_libraries(2ine "pthread")
 if(LX_LEGACY)
     set_target_properties(2ine PROPERTIES COMPILE_FLAGS "-m32")
     set_target_properties(2ine PROPERTIES LINK_FLAGS "-m32 -ggdb3")
 endif()
-target_link_libraries(2ine "pthread")
+
+# Build Turbo Vision (for debugger)
+if(BUILD_DEBUGGER)
+    option(TV_BUILD_EXAMPLES OFF)
+    option(TV_BUILD_TESTS OFF)
+    add_subdirectory(tvision)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tvision/include)
+endif()
 
 foreach(_I doscalls;msg;nls;quecalls;viocalls;kbdcalls;sesmgr;som;pmwin;pmshapi;pmgpi;tcpip32)
     add_library(${_I} SHARED "native/${_I}.c")
@@ -96,22 +113,100 @@ target_link_libraries(viocalls /usr/lib/i386-linux-gnu/libncursesw.so.6)
 
 # !!! FIXME: clean this up/
 if(LX_LEGACY)
-    target_link_libraries(2ine "${CMAKE_CURRENT_SOURCE_DIR}/libSDL2-2.0.so.0")
-    target_link_libraries(pmwin "${CMAKE_CURRENT_SOURCE_DIR}/libSDL2-2.0.so.0")
+    target_link_libraries(2ine ${SDL2_LIBRARIES})
+    target_link_libraries(pmwin ${SDL2_LIBRARIES})
 else()
     target_link_libraries(2ine "SDL2")
     target_link_libraries(pmwin "SDL2")
 endif()
 
 add_executable(lx_dump lx_dump.c)
+target_include_directories(lx_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
+if(LX_LEGACY)
+    set_target_properties(lx_dump PROPERTIES COMPILE_FLAGS "-m32")
+    set_target_properties(lx_dump PROPERTIES LINK_FLAGS "-m32 -ggdb3")
+    target_link_libraries(lx_dump capstone)
+endif()
 
 if(LX_LEGACY)
-    add_executable(lx_loader lx_loader.c)
+    add_executable(lx_loader lx_loader.c debugger/ldt_access.c)
     target_link_libraries(lx_loader 2ine)
-    target_link_libraries(lx_loader "dl")
+    target_link_libraries(lx_loader "dl" "rt")
     set_target_properties(lx_loader PROPERTIES COMPILE_FLAGS "-m32 -no-pie")
     set_target_properties(lx_loader PROPERTIES LINK_FLAGS "-m32 -no-pie -ggdb3")
 endif()
+
+# Turbo Debugger for 2ine (Turbo Vision-based)
+if(BUILD_DEBUGGER)
+    enable_language(CXX)
+    add_executable(td2ine
+        debugger/td2ine_main.cpp
+        debugger/td2ine_core.cpp
+        debugger/td2ine_tui_views.cpp
+        debugger/td2ine_tui_app.cpp
+        debugger/td2ine_text.cpp
+        debugger/ptrace_wrapper.c
+        debugger/ldt_access.c
+        debugger/disasm.c
+    )
+    target_include_directories(td2ine PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tvision/include
+    )
+    target_link_libraries(td2ine
+        capstone
+        tvision
+        pthread
+        rt
+    )
+    if(LX_LEGACY)
+        set_target_properties(td2ine PROPERTIES COMPILE_FLAGS "-m32")
+        set_target_properties(td2ine PROPERTIES LINK_FLAGS "-m32 -ggdb3")
+        set_target_properties(td2ine PROPERTIES LINKER_LANGUAGE CXX)
+        # Ensure 2ine and lx_loader are built first (needed for testing)
+        add_dependencies(td2ine 2ine lx_loader)
+    endif()
+    
+    # Headless test harness (no TUI dependencies)
+    add_executable(td_test
+        debugger/test_harness.c
+    )
+    target_link_libraries(td_test pthread rt)
+    if(LX_LEGACY)
+        set_target_properties(td_test PROPERTIES COMPILE_FLAGS "-m32")
+        set_target_properties(td_test PROPERTIES LINK_FLAGS "-m32 -ggdb3")
+        add_dependencies(td_test 2ine)
+    endif()
+
+    # Disassembly test (exercises ptrace_read_memory and capstone)
+    add_executable(td_disasm_test
+        debugger/td_disasm_test.c
+        debugger/disasm.c
+    )
+    target_include_directories(td_disasm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
+    target_link_libraries(td_disasm_test capstone pthread rt)
+    if(LX_LEGACY)
+        set_target_properties(td_disasm_test PROPERTIES COMPILE_FLAGS "-m32")
+        set_target_properties(td_disasm_test PROPERTIES LINK_FLAGS "-m32 -ggdb3")
+    endif()
+    
+    # OS/2 program debug test
+    add_executable(td_os2_test
+        debugger/test_os2_debug.c
+    )
+    target_link_libraries(td_os2_test pthread rt)
+    if(LX_LEGACY)
+        set_target_properties(td_os2_test PROPERTIES COMPILE_FLAGS "-m32")
+        set_target_properties(td_os2_test PROPERTIES LINK_FLAGS "-m32 -ggdb3")
+        add_dependencies(td_os2_test 2ine lx_loader)
+    endif()
+    
+    # Convenience target to build everything needed for debugging
+    add_custom_target(debugger ALL
+        DEPENDS td2ine 2ine lx_loader lx_dump
+        COMMENT "Debugger and dependencies built successfully"
+    )
+endif()  # BUILD_DEBUGGER
 
 # end of CMakeLists.txt ...
 
