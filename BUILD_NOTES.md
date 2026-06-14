@@ -12,17 +12,6 @@
 
 ## Build Approaches
 
-### ❌ Problematic: Installing 32-bit packages on 64-bit host
-
-```bash
-# DON'T do this - may remove/replace system packages
-sudo apt-get install libncursesw5-dev:i386 libsdl2-dev:i386
-```
-
-This can cause dependency conflicts and remove essential 64-bit packages.
-
-### ✅ Recommended: Podman Container (Isolated 32-bit Environment)
-
 Build in a 32-bit Debian container to avoid host system conflicts.
 
 ## Prerequisites
@@ -202,38 +191,11 @@ If you get compilation errors:
 
 2. Rebuild from scratch
 
-### Missing Dependencies
-
-If the container build fails, ensure you have network access to pull the base image (`i386/debian:bookworm`).
-
-## Alternative: Native 32-bit Compilation
-
-If you prefer not to use containers and have a 64-bit Ubuntu/Debian system with multiarch enabled:
-
-```bash
-# Enable i386 architecture
-sudo dpkg --add-architecture i386
-sudo apt-get update
-
-# Install 32-bit build tools (may conflict with existing packages)
-sudo apt-get install gcc-multilib g++-multilib libncursesw5-dev:i386 libsdl2-dev:i386
-
-# Build normally
-mkdir build && cd build
-cmake ..
-make
-```
-
-**Warning:** This approach can cause package conflicts on your host system. Container approach is recommended.
-
 ## References
 
 - Original project author: Ryan C. Gordon (icculus@icculus.org)
-- OS/2 LX format documentation
-- Linux mmap(2) man page
 
-## debugging and development
-
+## notes for compiling OS/2 executables on linux using open-watcom
 
 - openwatcom build tools are available in ~/ow/open-watcom-v2/rel/binl64
 -  to compile an 16-bit os/2 executable:
@@ -243,5 +205,4 @@ make
 -  wcc -bt=os2 -d1 hello.c
 -  wdis -l -s hello.obj
 - use wdump to dump the executable
-- example project with debug info is available in the following locaiton.
-- ./tests/debug
+
