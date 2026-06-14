@@ -36,6 +36,6 @@ For complete build instructions and debugging information, see [BUILD_NOTES.md](
 
 *AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
 
-All possible thanks to the work of the other of Ryan who created 2ine.
+All possible thanks to the work of Ryan who created 2ine.
 
 https://github.com/icculus/2ine
