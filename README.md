@@ -1,6 +1,6 @@
 ## 2ine Debugger Fork
 
-This fork adds a Turbo Debugger-compatible TUI debugger for OS/2 programs running on 2ine.
+This fork adds a Turbo Debugger style TUI debugger for OS/2 programs running on 2ine.
 
 ### Building the Debugger
 
