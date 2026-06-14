@@ -6,7 +6,7 @@ usage:
 
 td2ine ../tests/hello16.exe
 
-*AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
+
 
 # 2ine
 
@@ -44,30 +44,16 @@ This fork adds a Turbo Debugger-compatible TUI debugger for OS/2 programs runnin
 - 32-bit build environment (see BUILD_NOTES.md)
 - Capstone disassembly engine (submodule)
 - Turbo Vision TUI library (submodule)
+- Need to use podman for building if you are on amd64
 
 **Initialize submodules:**
 ```bash
 git submodule update --init
 ```
-
-**Build:**
-```bash
-mkdir build && cd build
-cmake ..
-make
-```
-
-The debugger executable `td2ine` will be built along with `lx_loader` and other components.
-
 ### Running the Debugger
 
 ```bash
-./build/td2ine ./build/lx_loader tests/hello16.exe
-```
-
-Or attach to a running process:
-```bash
-./build/td2ine --pid <pid>
+./build/td2ine ../tests/hello16.exe
 ```
 
 ### Keyboard Shortcuts
@@ -83,4 +69,6 @@ Or attach to a running process:
 | Up/Down | Scroll in active window |
 
 For complete build instructions and debugging information, see [BUILD_NOTES.md](BUILD_NOTES.md).
+
+*AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
 
