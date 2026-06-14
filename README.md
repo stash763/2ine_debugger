@@ -1,6 +1,6 @@
 # 2ine-debugger
 
-This adds a debugger styled after turbo debugger for OS/2 executables, definitely a work in progress.
+This fork adds a debugger styled after turbo debugger for OS/2 executables, definitely a work in progress.
 
 usage:
 
