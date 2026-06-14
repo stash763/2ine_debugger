@@ -36,29 +36,6 @@ For complete build instructions and debugging information, see [BUILD_NOTES.md](
 
 *AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
 
-# 2ine
+All possible thanks to the work of the other of Ryan who created 2ine.
 
-*What is this?*
-
-It's a program that loads and runs OS/2 .exe files on Linux.
-
-*Does it work?*
-
-Barely. It runs some command line OS/2 apps.
-
-*Why?*
-
-Because.
-
-*Does it work on Mac OS X?*
-
-No.
-
-*I have questions.*
-
-I have answers: icculus@icculus.org
-
---ryan.
-
----
-
+https://github.com/icculus/2ine
