@@ -21,6 +21,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <sys/wait.h>
 
 // 16-bit selector kernel nonsense...
 #include <sys/syscall.h>
@@ -28,6 +29,39 @@
 #include <asm/ldt.h>
 
 #include "lib2ine.h"
+
+// Debug shared state (from ldt_access.h)
+#define LOADER_MAX_API_ENTRIES 512
+#define LOADER_MAX_API_NAME_LEN 48
+
+typedef struct {
+    uint32_t addr;
+    char name[LOADER_MAX_API_NAME_LEN];
+} ApiEntry;
+
+typedef struct DebugSharedState {
+    uint32_t selectors[8192];
+    uint32_t is_32bit[8192];
+    uint32_t is_code[8192];
+    uint32_t limit[8192];
+    int debugger_attached;
+    pid_t debugger_pid;
+    pid_t debuggee_pid;
+    uint32_t debuggee_eip;
+    uint32_t debuggee_esp;
+    uint32_t entry_eip;
+    uint16_t entry_cs;
+    uint8_t entry_byte;
+    uint8_t breakpoint_active;
+    uint8_t is_lx_mode;
+    uint8_t padding;
+    uint32_t ne_entry_eip;
+    uint32_t api_count;
+    ApiEntry api_entries[LOADER_MAX_API_ENTRIES];
+} DebugSharedState;
+
+extern DebugSharedState* ldt_open_shared(int create);
+extern void ldt_close_shared(DebugSharedState *state);
 
 // !!! FIXME: move this into an lx_common.c file.
 static int sanityCheckLxModule(const uint8 *exe, const uint32 exelen)
@@ -2711,6 +2745,8 @@ static void segfault_catcher(int sig, siginfo_t *info, void *ctx)
     abort();  // cash out.
 } // segfault_catcher
 
+static DebugSharedState *g_debug_state = NULL;
+
 static int installSignalHandlers(void)
 {
     struct sigaction action;
@@ -2734,6 +2770,16 @@ int main(int argc, char **argv, char **envp)
         return 1;
     }
 
+    // Check for debug mode early - create SHM so debugger can open it
+    const char *debug_env = getenv("TD2INE_DEBUG");
+    if (debug_env && debug_env[0] == '1') {
+        g_debug_state = ldt_open_shared(1);
+        if (g_debug_state) {
+            memset(g_debug_state, 0, sizeof(DebugSharedState));
+            fprintf(stderr, "[LOADER] Debug SHM created at %p\n", (void*)g_debug_state);
+        }
+    }
+    
     GLoaderState.ldt = (uint32 *) calloc(LX_MAX_LDT_SLOTS, sizeof (*GLoaderState.ldt));
     if (!GLoaderState.ldt) {
         fprintf(stderr, "Out of memory\n");
@@ -2774,8 +2820,83 @@ int main(int argc, char **argv, char **envp)
 
     const char *modulename = GLoaderState.subprocess ? getenv("IS_2INE") : argv[1];
     LxModule *lxmod = loadModuleByPath(modulename);
-    if (lxmod != NULL)
+    if (lxmod != NULL) {
+        // Debug setup: set entry breakpoint if TD2INE_DEBUG is set
+        const char *debug_env = getenv("TD2INE_DEBUG");
+        if (debug_env && debug_env[0] == '1' && g_debug_state) {
+            // Copy LDT entries to shared state so debugger can compute linear addresses
+            for (int i = 0; i < LX_MAX_LDT_SLOTS; i++) {
+                g_debug_state->selectors[i] = GLoaderState.ldt[i];
+                g_debug_state->is_32bit[i] = 0;  // Default to 16-bit for NE modules
+                g_debug_state->is_code[i] = 0;
+                g_debug_state->limit[i] = 0xFFFF;  // 64K limit for 16-bit segments
+            }
+
+            // Populate API name table from loaded module exports
+            // Scan all loaded modules for 16-bit thunk exports and record
+            // their selector:offset -> API name mapping for the debugger
+            {
+                uint32_t api_idx = 0;
+                for (LxModule *mod = GLoaderState.loaded_modules; mod != NULL && api_idx < LOADER_MAX_API_ENTRIES; mod = mod->next) {
+                    for (uint32_t e = 0; e < mod->num_exports && api_idx < LOADER_MAX_API_ENTRIES; e++) {
+                        const LxExport *exp = &mod->exports[e];
+                        if (exp->addr != NULL && exp->name != NULL && exp->object != NULL) {
+                            void *thunk_addr = exp->addr;
+                            // For 16-bit bridge exports, addr is a void** pointing to the actual thunk
+                            if (exp->object->alias != 0xFFFF) {
+                                thunk_addr = *((void**)exp->addr);
+                            }
+                            uint32_t linear = (uint32_t)(size_t)thunk_addr;
+                            if (linear != 0) {
+                                g_debug_state->api_entries[api_idx].addr = linear;
+                                strncpy(g_debug_state->api_entries[api_idx].name, exp->name, LOADER_MAX_API_NAME_LEN - 1);
+                                g_debug_state->api_entries[api_idx].name[LOADER_MAX_API_NAME_LEN - 1] = '\0';
+                                api_idx++;
+                            }
+                        }
+                    }
+                }
+                g_debug_state->api_count = api_idx;
+                fprintf(stderr, "[LOADER] Populated %u API entries for debugger\n", api_idx);
+            }
+            uint32_t entry_linear = 0;
+            if (lxmod->is_lx) {
+                // LX mode: eip is already linear
+                entry_linear = lxmod->eip;
+                g_debug_state->is_lx_mode = 1;
+                g_debug_state->entry_eip = entry_linear;
+                g_debug_state->debuggee_pid = getpid();
+                fprintf(stderr, "[LOADER] LX entry breakpoint at 0x%08X\n", entry_linear);
+            } else {
+                // NE mode: eip is CS:IP, need to convert to linear
+                uint16_t cs = (lxmod->eip >> 16) & 0xFFFF;
+                uint16_t ip = lxmod->eip & 0xFFFF;
+                // Get segment base from LDT - selector index is bits 3-15
+                uint16_t selector_index = (cs >> 3) & 0x1FFF;
+                uint32_t seg_base = GLoaderState.ldt[selector_index];
+                entry_linear = seg_base + ip;
+                g_debug_state->is_lx_mode = 0;
+                g_debug_state->entry_eip = entry_linear;
+                g_debug_state->ne_entry_eip = entry_linear;
+                g_debug_state->debuggee_pid = getpid();
+                fprintf(stderr, "[LOADER] NE entry breakpoint at CS:IP=%04X:%04X (linear=%08X)\n", cs, ip, entry_linear);
+            }
+            // Save original byte and write INT3 breakpoint at entry point
+            // First make the page writable (it was set to PROT_EXEC by the loader)
+            uint32_t page_start = entry_linear & ~(sysconf(_SC_PAGESIZE) - 1);
+            mprotect((void*)page_start, 4096, PROT_READ | PROT_WRITE | PROT_EXEC);
+            
+            uint8_t orig_byte = *(uint8_t*)entry_linear;
+            g_debug_state->entry_byte = orig_byte;
+            uint8_t int3 = 0xCC;
+            memcpy((void*)entry_linear, &int3, 1);
+            g_debug_state->breakpoint_active = 1;
+            fprintf(stderr, "[LOADER] Entry INT3 written at 0x%08X\n", entry_linear);
+            raise(SIGSTOP);
+            fprintf(stderr, "[LOADER] Debugger attached\n");
+        }
         runModule(lxmod);
+    }
 
     return 1;
 } // main
