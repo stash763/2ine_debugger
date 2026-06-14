@@ -1,3 +1,13 @@
+# 2ine-debugger
+
+This adds a debugger styled after turbo debugger for OS/2 executables, definitely a work in progress.
+
+usage:
+
+td2ine ../tests/hello16.exe
+
+*AI Disclosure, these additions were largely done using qwen 3.5 397b and glm 5.1
+
 # 2ine
 
 *What is this?*
