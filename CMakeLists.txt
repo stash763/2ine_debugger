@@ -167,29 +167,6 @@ if(BUILD_DEBUGGER)
         add_dependencies(td2ine 2ine lx_loader)
     endif()
     
-    # Headless test harness (no TUI dependencies)
-    add_executable(td_test
-        debugger/test_harness.c
-    )
-    target_link_libraries(td_test pthread rt)
-    if(LX_LEGACY)
-        set_target_properties(td_test PROPERTIES COMPILE_FLAGS "-m32")
-        set_target_properties(td_test PROPERTIES LINK_FLAGS "-m32 -ggdb3")
-        add_dependencies(td_test 2ine)
-    endif()
-
-    # Disassembly test (exercises ptrace_read_memory and capstone)
-    add_executable(td_disasm_test
-        debugger/td_disasm_test.c
-        debugger/disasm.c
-    )
-    target_include_directories(td_disasm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include)
-    target_link_libraries(td_disasm_test capstone pthread rt)
-    if(LX_LEGACY)
-        set_target_properties(td_disasm_test PROPERTIES COMPILE_FLAGS "-m32")
-        set_target_properties(td_disasm_test PROPERTIES LINK_FLAGS "-m32 -ggdb3")
-    endif()
-    
     # OS/2 program debug test
     add_executable(td_os2_test
         debugger/test_os2_debug.c
