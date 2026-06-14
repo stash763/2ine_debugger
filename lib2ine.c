@@ -245,8 +245,10 @@ static void initPib(void)
 
     *(ptr++) = '\0';
 
-    pib->pib_ulpid = (uint32) getpid();
-    pib->pib_ulppid = (uint32) getppid();
+    // OS/2 uses 16-bit PIDs/TIDs, so mask to 16-bit range
+    // This is necessary for compatibility, especially when running under debuggers
+    pib->pib_ulpid = ((uint32) getpid()) & 0xFFFF;
+    pib->pib_ulppid = ((uint32) getppid()) & 0xFFFF;
     pib->pib_pchcmd = cmd;
     pib->pib_pchenv = env;
     //pib->pib_hmte is filled in later during loadModule()
@@ -278,7 +280,7 @@ static void initOs2Tib_lib2ine(uint8 *tibspace, void *_topOfStack, const size_t 
     tib->tib_version = 20;  // !!! FIXME
     tib->tib_ordinal = 79;  // !!! FIXME
 
-    tib2->tib2_ultid = tid;
+    tib2->tib2_ultid = tid & 0xFFFF;  // OS/2 uses 16-bit TIDs
     tib2->tib2_ulpri = 512;
     tib2->tib2_version = 20;
     tib2->tib2_usMCCount = 0;

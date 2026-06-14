@@ -1281,7 +1281,8 @@ static void os2ThreadCleanup(void *arg)
 static void os2ThreadEntry2(uint8 *tibspace, Thread *thread)
 {
     void *esp = NULL;  // close enough.
-    GLoaderState.initOs2Tib(tibspace, &esp, thread->stacklen, (TID) thread);
+    // OS/2 uses 16-bit TIDs, so mask to 16-bit range
+    GLoaderState.initOs2Tib(tibspace, &esp, thread->stacklen, ((TID)(size_t)thread) & 0xFFFF);
     thread->selector = GLoaderState.setOs2Tib(tibspace);
     pthread_cleanup_push(os2ThreadCleanup, thread);
     thread->fn(thread->fnarg);

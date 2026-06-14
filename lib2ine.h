@@ -205,6 +205,7 @@ struct LxModule
 {
     uint32 refcount;
     int is_lx;  // 1 if an LX module, 0 if NE.
+    int is_stub;  // 1 if a stub module for debugging (no actual code)
     union
     {
         LxHeader lx;
