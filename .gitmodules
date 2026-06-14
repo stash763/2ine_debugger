@@ -1,0 +1,6 @@
+[submodule "capstone"]
+	path = capstone
+	url = https://github.com/capstone-engine/capstone.git
+[submodule "tvision"]
+	path = tvision
+	url = https://github.com/magiblot/tvision.git
