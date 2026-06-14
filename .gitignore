@@ -1,2 +1,21 @@
+# Build directories
 cmake-*
+build/
+
+# IDE files
+.idea/
+
+# Build artifacts
+*.bin
+*.o
+*.obj
+*.lst
+*.so
+*.a
+
+# Test artifacts (keep source, exclude built executables)
+# Note: Original test executables from icculus/2ine are kept
+
+# External tools
+wdump.exe
 
