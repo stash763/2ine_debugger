@@ -54,7 +54,7 @@ TDebugApp::TDebugApp(int argc, char **argv, pid_t pid, DebugSharedState *shared)
 
     int regsHeight = 8;
     int stackHeight = 8;
-    int outputHeight = 4;
+    int outputHeight = 8;
 
     updateRegisters();
 
