@@ -246,6 +246,14 @@ void TMemView::draw()
     TColorAttr color = getColor(1);
     char lineBuf[256];
 
+    uint16_t ds = (uint16_t)(
+#ifdef __i386__
+        g_debug_regs.xds
+#else
+        g_debug_regs.ds
+#endif
+    );
+
     // Header
     b.moveChar(0, ' ', color, size.x);
     b.moveStr(0, "Address   00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F  ASCII", color);
@@ -255,15 +263,20 @@ void TMemView::draw()
         b.moveChar(0, ' ', color, size.x);
         uint32_t rowAddr = memAddr + (row - 1) * 16;
 
+        uint32_t linearAddr = rowAddr;
+        if (!g_debug.is_lx_mode && g_debug.shared_state) {
+            linearAddr = ldt_selector_to_linear(g_debug.shared_state, ds, (uint16_t)rowAddr);
+        }
+
         snprintf(lineBuf, sizeof(lineBuf), "%08X ", rowAddr);
         b.moveStr(0, lineBuf, color);
 
-        if (g_debug_pid > 0) {
+        if (g_debug_pid > 0 && linearAddr != 0xFFFFFFFF) {
             uint8_t mem[16];
             memset(mem, 0, sizeof(mem));
             for (int i = 0; i < 16; i++) {
-                long word = ptrace(PTRACE_PEEKTEXT, g_debug_pid, (void *)((rowAddr + i) & ~3UL), NULL);
-                mem[i] = (word >> (((rowAddr + i) & 3) * 8)) & 0xFF;
+                long word = ptrace(PTRACE_PEEKTEXT, g_debug_pid, (void *)((linearAddr + i) & ~3UL), NULL);
+                mem[i] = (word >> (((linearAddr + i) & 3) * 8)) & 0xFF;
             }
 
             int col = 10;
