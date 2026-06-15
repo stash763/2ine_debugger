@@ -260,7 +260,8 @@ void TDebugApp::doStep()
             handleSoftwareStepBreakpoint();
             drainOutput();
             updateRegisters();
-            showMessage("Step at CS:IP=%04X:%04X", (uint16_t)g_debug_regs.xcs, (uint16_t)g_debug_regs.eip);
+            if (g_debug.verbose_step)
+                showMessage("Step at CS:IP=%04X:%04X", (uint16_t)g_debug_regs.xcs, (uint16_t)g_debug_regs.eip);
             redrawAll();
         } else if (ret > 0 && WIFEXITED(status)) {
             drainOutput();
@@ -275,7 +276,8 @@ void TDebugApp::doStep()
         if (ret > 0 && WIFSTOPPED(status)) {
             drainOutput();
             updateRegisters();
-            showMessage("Stopped at 0x%08X", (uint32_t)g_debug_regs.eip);
+            if (g_debug.verbose_step)
+                showMessage("Stopped at 0x%08X", (uint32_t)g_debug_regs.eip);
             redrawAll();
         } else if (ret > 0 && WIFEXITED(status)) {
             drainOutput();
@@ -340,7 +342,8 @@ void TDebugApp::doStepOver()
     }
     g_debug.step_over_active = 1;
 
-    showMessage("Step over %s %s -> 0x%08X...", instr.mnemonic, instr.op_str, next_linear);
+    if (g_debug.verbose_step)
+        showMessage("Step over %s %s -> 0x%08X...", instr.mnemonic, instr.op_str, next_linear);
     ptrace(PTRACE_CONT, debug_pid, NULL, NULL);
     int status; int ret = waitpid(debug_pid, &status, 0);
 

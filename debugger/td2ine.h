@@ -59,6 +59,7 @@ struct DebugState {
     int bit_width;
     int ran_resume_cmd;   // 1 after c/s/p commands that consumed SIGTRAP internally
     int output_pipe_fd;   // read end of pipe capturing debuggee stdout (-1 if none)
+    int verbose_step;     // 1 to show step messages, 0 to suppress them
 };
 
 // Global state (defined in td2ine_core.cpp)

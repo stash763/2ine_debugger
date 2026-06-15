@@ -449,6 +449,7 @@ int main(int argc, char **argv)
     g_debug.running = 1;
     g_debug.bit_width = 32;
     g_debug.output_pipe_fd = -1;
+    g_debug.verbose_step = 0;  // 0 = suppress step messages, 1 = show them
 
     /* Unlink any stale SHM from previous runs, then let the loader create it */
     shm_unlink(DEBUG_SHM_NAME);
