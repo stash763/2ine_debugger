@@ -50,30 +50,30 @@ TDebugApp::TDebugApp(int argc, char **argv, pid_t pid, DebugSharedState *shared)
     int dWidth = desktopExtent.b.x - desktopExtent.a.x;
     int dHeight = desktopExtent.b.y - desktopExtent.a.y;
 
-    int halfWidth = dWidth / 2;
+    int leftWidth = (dWidth * 2) / 3;
+
     int regsHeight = 8;
+    int stackHeight = 8;
     int outputHeight = 4;
-    int disasmHeight = dHeight - regsHeight - outputHeight;
-    if (disasmHeight < 4) disasmHeight = 4;
 
     updateRegisters();
 
     // All coordinates are in desktop-local space (0,0 = top-left of desktop area)
-    // Left column
-    regsWindow = new TRegsWindow(TRect(0, 0, halfWidth, regsHeight));
-    deskTop->insert(regsWindow);
-
-    memWindow = new TMemWindow(TRect(0, regsHeight, halfWidth, dHeight - outputHeight));
-    deskTop->insert(memWindow);
-
-    // Right column
-    disasmWindow = new TDisasmWindow(TRect(halfWidth, 0, dWidth, regsHeight + disasmHeight));
+    // Left side: Disassembly (full height)
+    disasmWindow = new TDisasmWindow(TRect(0, 0, leftWidth, dHeight - outputHeight));
     deskTop->insert(disasmWindow);
 
-    stackWindow = new TStackWindow(TRect(halfWidth, regsHeight + disasmHeight, dWidth, dHeight - outputHeight));
+    // Right column (top to bottom): Registers, Stack, Memory
+    regsWindow = new TRegsWindow(TRect(leftWidth, 0, dWidth, regsHeight));
+    deskTop->insert(regsWindow);
+
+    stackWindow = new TStackWindow(TRect(leftWidth, regsHeight, dWidth, regsHeight + stackHeight));
     deskTop->insert(stackWindow);
 
-    // Output (full width at bottom)
+    memWindow = new TMemWindow(TRect(leftWidth, regsHeight + stackHeight, dWidth, dHeight - outputHeight));
+    deskTop->insert(memWindow);
+
+    // Bottom: Output (full width)
     outputWindow = new TOutputWindow(TRect(0, dHeight - outputHeight, dWidth, dHeight));
     deskTop->insert(outputWindow);
 }

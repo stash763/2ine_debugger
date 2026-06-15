@@ -331,38 +331,42 @@ void TStackView::draw()
     TColorAttr color = getColor(1);
     char buf[64];
 
+    uint16_t ss = (uint16_t)(
+#ifdef __i386__
+        g_debug_regs.xss
+#else
+        g_debug_regs.ss
+#endif
+    );
+
     uint32_t esp = (uint32_t)g_debug_regs.esp;
 
     for (int row = 0; row < size.y; row++) {
         b.moveChar(0, ' ', color, size.x);
         if (g_debug.is_lx_mode) {
             uint32_t stackAddr = esp + row * 4;
-            snprintf(buf, sizeof(buf), "%04X:%04X ", (uint16_t)
-#ifdef __i386__
-                g_debug_regs.xss,
-#else
-                g_debug_regs.ss,
-#endif
-                (uint16_t)stackAddr);
+            uint32_t linearStackAddr = stackAddr;
+
+            snprintf(buf, sizeof(buf), "%04X:%04X ", (uint16_t)ss, (uint16_t)stackAddr);
             b.moveStr(0, buf, color);
-            if (g_debug_pid > 0) {
-                long word = ptrace(PTRACE_PEEKTEXT, g_debug_pid, (void *)(stackAddr & ~3UL), NULL);
+            if (g_debug_pid > 0 && linearStackAddr != 0xFFFFFFFF) {
+                long word = ptrace(PTRACE_PEEKDATA, g_debug_pid, (void *)(linearStackAddr & ~3UL), NULL);
                 snprintf(buf, sizeof(buf), "%08X", (uint32_t)word);
                 b.moveStr(14, buf, color);
             }
         } else {
-            uint16_t stackAddr = (uint16_t)(esp + row * 2);
-            snprintf(buf, sizeof(buf), "%04X:%04X ", (uint16_t)
-#ifdef __i386__
-                g_debug_regs.xss,
-#else
-                g_debug_regs.ss,
-#endif
-                stackAddr);
+            uint16_t stackOffset = (uint16_t)(esp + row * 2);
+            uint32_t linearStackAddr = stackOffset;
+
+            if (g_debug.shared_state) {
+                linearStackAddr = ldt_selector_to_linear(g_debug.shared_state, ss, stackOffset);
+            }
+
+            snprintf(buf, sizeof(buf), "%04X:%04X ", (uint16_t)ss, stackOffset);
             b.moveStr(0, buf, color);
-            if (g_debug_pid > 0) {
-                long word = ptrace(PTRACE_PEEKTEXT, g_debug_pid, (void *)((esp + row * 2) & ~3UL), NULL);
-                uint16_t val = (word >> (((esp + row * 2) & 3) * 8)) & 0xFFFF;
+            if (g_debug_pid > 0 && linearStackAddr != 0xFFFFFFFF) {
+                long word = ptrace(PTRACE_PEEKDATA, g_debug_pid, (void *)(linearStackAddr & ~3UL), NULL);
+                uint16_t val = (word >> (((linearStackAddr & 3) * 8))) & 0xFFFF;
                 snprintf(buf, sizeof(buf), "%04X", val);
                 b.moveStr(14, buf, color);
             }
