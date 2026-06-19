@@ -40,7 +40,8 @@ enum {
     cmViewStack,
     cmViewOutput,
     cmBreakpointToggle,
-    cmDebugHelp
+    cmDebugHelp,
+    cmReset
 };
 
 // Debug state structure
