@@ -33,6 +33,7 @@ private:
     class TMemWindow *memWindow;
     class TStackWindow *stackWindow;
     class TOutputWindow *outputWindow;
+    class TSourceWindow *sourceWindow;
 
     void doStep();
     void doStepOver();
@@ -547,7 +548,16 @@ int main(int argc, char **argv)
         run_autostep(autostep_count, g_debug.pid, g_debug.shared_state);
         disasm_cleanup();
         ldt_close_shared(g_debug.shared_state);
+        dwarf_cleanup();
         return 0;
+    }
+
+    /* Load DWARF debug info from the executable for source-level debugging */
+    if (dwarf_init(program) == 0 && g_dwarf.loaded) {
+        fprintf(stderr, "DWARF debug info loaded: %d lines, %d files, %d ranges\n",
+                g_dwarf.line_count, g_dwarf.file_count, g_dwarf.range_count);
+    } else {
+        fprintf(stderr, "No DWARF debug info found (or failed to load)\n");
     }
 
     if (use_tui) {
@@ -559,6 +569,7 @@ int main(int argc, char **argv)
     }
 
     disasm_cleanup();
+    dwarf_cleanup();
     ldt_close_shared(g_debug.shared_state);
     fprintf(stderr, "Program exited.\n");
     return 0;

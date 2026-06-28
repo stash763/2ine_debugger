@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     libncursesw5-dev \
     libsdl2-dev \
     libsdl2-2.0-0 \
+    libdwarf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

@@ -427,3 +427,131 @@ TOutputWindow::TOutputWindow(const TRect& bounds)
     outputView = new TOutputView(r);
     insert(outputView);
 }
+
+// --- Source View ---
+class TSourceView : public TView
+{
+public:
+    TSourceView(const TRect& bounds, TScrollBar *vsb);
+    void draw() override;
+private:
+    TScrollBar *vScrollBar;
+};
+
+TSourceView::TSourceView(const TRect& bounds, TScrollBar *vsb)
+    : TView(bounds), vScrollBar(vsb)
+{
+    options |= ofSelectable;
+}
+
+void TSourceView::draw()
+{
+    TDrawBuffer b;
+    TColorAttr color = getColor(1);
+    TColorAttr hiColor = getColor(2);
+    TColorAttr arrowColor = getColor(3);
+
+    /* Get current linear address from CS:IP */
+    uint32_t linearAddr = (uint32_t)g_debug_regs.eip;
+    uint16_t cs = 0;
+    if (!g_debug.is_lx_mode && g_debug.shared_state) {
+        cs = (uint16_t)(
+#ifdef __i386__
+            g_debug_regs.xcs
+#else
+            g_debug_regs.cs
+#endif
+        );
+        uint32_t linear = linearAddressFromSelectors(g_debug.shared_state, cs, (uint16_t)linearAddr);
+        if (linear) linearAddr = linear;
+    }
+
+    /* Map linear address to source file and line */
+    const char *filename = NULL;
+    int currentLine = 0;
+    uint16_t srcSegment = 0;
+    uint32_t srcOffset = 0;
+    int found = -1;
+    if (g_dwarf.loaded) {
+        found = dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
+                                    linearAddr, &filename, &currentLine,
+                                    &srcSegment, &srcOffset);
+    }
+
+    /* Load source file */
+    char **srcLines = NULL;
+    int numLines = 0;
+    if (found == 0 && filename) {
+        dwarf_get_source(filename, &srcLines, &numLines);
+    }
+
+    /* Compute scroll position: center current line */
+    int topLine = 0;
+    if (currentLine > 0 && currentLine <= numLines) {
+        topLine = currentLine - size.y / 2;
+        if (topLine < 0) topLine = 0;
+        if (topLine > numLines - size.y) topLine = numLines - size.y;
+        if (topLine < 0) topLine = 0;
+    }
+    if (vScrollBar && numLines > 0) {
+        vScrollBar->setRange(0, numLines > size.y ? numLines - size.y : 0);
+        vScrollBar->setValue(topLine);
+    }
+
+    /* Draw the source */
+    char lineBuf[256];
+    for (int row = 0; row < size.y; row++) {
+        b.moveChar(0, ' ', color, size.x);
+        int lineIdx = topLine + row;
+        int isCurrent = (found == 0 && currentLine > 0 && lineIdx == currentLine - 1);
+
+        if (isCurrent) {
+            snprintf(lineBuf, sizeof(lineBuf), "%4d>", lineIdx + 1);
+            b.moveStr(0, lineBuf, arrowColor);
+        } else if (lineIdx >= 0 && lineIdx < numLines && srcLines && srcLines[lineIdx]) {
+            snprintf(lineBuf, sizeof(lineBuf), "%4d ", lineIdx + 1);
+            b.moveStr(0, lineBuf, color);
+        } else {
+            snprintf(lineBuf, sizeof(lineBuf), "%4d ", lineIdx + 1);
+            b.moveStr(0, lineBuf, color);
+        }
+
+        if (lineIdx >= 0 && lineIdx < numLines && srcLines && srcLines[lineIdx]) {
+            int col = 5;
+            int lineLen = strlen(srcLines[lineIdx]);
+            int avail = size.x - col;
+            if (lineLen > avail) lineLen = avail;
+            if (isCurrent)
+                b.moveStr(col, srcLines[lineIdx], hiColor, lineLen);
+            else
+                b.moveStr(col, srcLines[lineIdx], color, lineLen);
+        }
+
+        writeLine(0, row, size.x, 1, b);
+    }
+
+    /* If no source found, show a message on first line */
+    if (found != 0 && size.y > 0) {
+        b.moveChar(0, ' ', color, size.x);
+        if (!g_dwarf.loaded) {
+            snprintf(lineBuf, sizeof(lineBuf), "  No debug info");
+        } else if (!filename) {
+            snprintf(lineBuf, sizeof(lineBuf), "  No source mapping at 0x%08X", linearAddr);
+        } else {
+            snprintf(lineBuf, sizeof(lineBuf), "  Source not found: %s", filename ? filename : "?");
+        }
+        b.moveStr(0, lineBuf, color);
+        writeLine(0, 0, size.x, 1, b);
+    }
+}
+
+// --- Source Window (container) ---
+TSourceWindow::TSourceWindow(const TRect& bounds)
+    : TWindowInit(&TSourceWindow::initFrame),
+      TWindow(bounds, " Source ", wnNoNumber)
+{
+    vScrollBar = standardScrollBar(sbVertical | sbHandleKeyboard);
+    TRect r = getExtent();
+    r.grow(-1, -1);
+    insert(new TSourceView(r, vScrollBar));
+}

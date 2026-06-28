@@ -23,6 +23,7 @@
 
 #include "ldt_access.h"
 #include "disasm.h"
+#include "dwarf_info.h"
 
 #ifdef __i386__
 #include <sys/reg.h>
@@ -39,6 +40,7 @@ enum {
     cmViewDisasm,
     cmViewStack,
     cmViewOutput,
+    cmViewSource,
     cmBreakpointToggle,
     cmDebugHelp,
     cmReset

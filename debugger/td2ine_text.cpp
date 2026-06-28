@@ -447,6 +447,51 @@ void handleDebuggerCommand(void)
     cmd[strcspn(cmd, "\n")] = 0;
     if (strcmp(cmd, "r") == 0 || strcmp(cmd, "regs") == 0) printRegisters();
     else if (strcmp(cmd, "u") == 0 || strcmp(cmd, "unass") == 0 || strcmp(cmd, "dis") == 0) printDisassembly();
+    else if (strcmp(cmd, "l") == 0 || strcmp(cmd, "list") == 0 || strcmp(cmd, "src") == 0) {
+        /* Show current source location */
+        if (!g_dwarf.loaded) {
+            fprintf(stderr, "\nNo DWARF debug info loaded.\n");
+        } else {
+            uint32_t linearAddr = (uint32_t)g_debug.regs.eip;
+            if (!g_debug.is_lx_mode && g_debug.shared_state) {
+                uint16_t cs = (uint16_t)(
+#ifdef __i386__
+                    g_debug.regs.xcs
+#else
+                    g_debug.regs.cs
+#endif
+                );
+                uint32_t linear = linearAddressFromSelectors(g_debug.shared_state, cs, (uint16_t)linearAddr);
+                if (linear) linearAddr = linear;
+            }
+            const char *filename = NULL;
+            int line = 0;
+            uint16_t seg = 0;
+            uint32_t off = 0;
+            if (dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
+                                    linearAddr, &filename, &line, &seg, &off) == 0) {
+                fprintf(stderr, "\nSource: %s:%d (seg=%u off=0x%04X)\n", filename ? filename : "?", line, seg, off);
+                char **srcLines = NULL;
+                int numLines = 0;
+                if (dwarf_get_source(filename, &srcLines, &numLines) == 0) {
+                    int start = line - 5;
+                    if (start < 0) start = 0;
+                    int end = line + 5;
+                    if (end > numLines) end = numLines;
+                    for (int i = start; i < end; i++) {
+                        if (i + 1 == line)
+                            fprintf(stderr, "  > %4d  %s\n", i + 1, srcLines[i] ? srcLines[i] : "");
+                        else
+                            fprintf(stderr, "    %4d  %s\n", i + 1, srcLines[i] ? srcLines[i] : "");
+                    }
+                } else {
+                    fprintf(stderr, "  (source file not found: %s)\n", filename ? filename : "?");
+                }
+            } else {
+                fprintf(stderr, "\nNo source mapping at 0x%08X\n", linearAddr);
+            }
+        }
+    }
     else if (strcmp(cmd, "c") == 0 || strcmp(cmd, "cont") == 0) {
         ptrace_continue(g_debug.pid);
         int status;
@@ -588,17 +633,55 @@ void handleDebuggerCommand(void)
         fprintf(stderr, "Quitting debugger...\n"); g_debug.running = 0;
     }
     else if (strcmp(cmd, "h") == 0 || strcmp(cmd, "help") == 0)
-        fprintf(stderr, "Commands: r/regs, u/disassemble, c/cont, s/step, p/next/over, q/quit\n");
+        fprintf(stderr, "Commands: r/regs, u/disassemble, l/list/source, c/cont, s/step, p/next/over, q/quit\n");
     else fprintf(stderr, "Unknown command: %s (type 'h' for help)\n", cmd);
 }
 
 void runTextMode(void)
 {
     fprintf(stderr, "\nRunning in text mode (no TUI)\n");
-    fprintf(stderr, "Commands: r=regs, u/disassemble, c/continue, s/step, p=step-over, q=quit\n");
-    
+    fprintf(stderr, "Commands: r=regs, u/disassemble, l/list/source, c=continue, s=step, p=step-over, q=quit\n");
+
     // Entry breakpoint already handled in main() - just show initial state
     printRegisters(); printDisassembly();
+
+    /* Show initial source location if DWARF is loaded */
+    if (g_dwarf.loaded) {
+        uint32_t linearAddr = (uint32_t)g_debug.regs.eip;
+        if (!g_debug.is_lx_mode && g_debug.shared_state) {
+            uint16_t cs = (uint16_t)(
+#ifdef __i386__
+                g_debug.regs.xcs
+#else
+                g_debug.regs.cs
+#endif
+            );
+            uint32_t linear = linearAddressFromSelectors(g_debug.shared_state, cs, (uint16_t)linearAddr);
+            if (linear) linearAddr = linear;
+        }
+        const char *filename = NULL;
+        int line = 0;
+        uint16_t seg = 0;
+        uint32_t off = 0;
+        if (dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
+                                linearAddr, &filename, &line, &seg, &off) == 0) {
+            fprintf(stderr, "\nSource: %s:%d (seg=%u off=0x%04X)\n", filename ? filename : "?", line, seg, off);
+            char **srcLines = NULL;
+            int numLines = 0;
+            if (dwarf_get_source(filename, &srcLines, &numLines) == 0) {
+                int start = line - 5;
+                if (start < 0) start = 0;
+                int end = line + 5;
+                if (end > numLines) end = numLines;
+                for (int i = start; i < end; i++) {
+                    if (i + 1 == line)
+                        fprintf(stderr, "  > %4d  %s\n", i + 1, srcLines[i] ? srcLines[i] : "");
+                    else
+                        fprintf(stderr, "    %4d  %s\n", i + 1, srcLines[i] ? srcLines[i] : "");
+                }
+            }
+        }
+    }
     
     // Main command loop
     int ran_resume_cmd = 0;

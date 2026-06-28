@@ -57,6 +57,14 @@ public:
     TStackWindow(const TRect& bounds);
 };
 
+class TSourceWindow : public TWindow
+{
+public:
+    TSourceWindow(const TRect& bounds);
+private:
+    TScrollBar *vScrollBar;
+};
+
 // Output view (accessed by TDebugApp)
 class TOutputView : public TView
 {

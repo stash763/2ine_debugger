@@ -35,6 +35,7 @@ private:
     TMemWindow *memWindow;
     TStackWindow *stackWindow;
     TOutputWindow *outputWindow;
+    TSourceWindow *sourceWindow;
 
     void doStep();
     void doStepOver();
@@ -53,7 +54,7 @@ TDebugApp::TDebugApp(int argc, char **argv, pid_t pid, DebugSharedState *shared)
     : TProgInit(&TDebugApp::initStatusLine, &TDebugApp::initMenuBar, &TProgram::initDeskTop),
       debug_pid(pid), shared_state(shared),
       regsWindow(nullptr), disasmWindow(nullptr), memWindow(nullptr),
-      stackWindow(nullptr), outputWindow(nullptr)
+      stackWindow(nullptr), outputWindow(nullptr), sourceWindow(nullptr)
 {
     // Parse arguments to find the actual target program (first non-flag argument)
     int prog_idx = -1;
@@ -81,18 +82,23 @@ TDebugApp::TDebugApp(int argc, char **argv, pid_t pid, DebugSharedState *shared)
     int dWidth = desktopExtent.b.x - desktopExtent.a.x;
     int dHeight = desktopExtent.b.y - desktopExtent.a.y;
 
-    int leftWidth = (dWidth * 2) / 3;
+    int leftWidth = (dWidth * 2) / 3 - 16;
+    if (leftWidth < 40) leftWidth = 40;
 
     int regsHeight = 8;
     int stackHeight = 8;
     int outputHeight = 8;
+    int disasmHeight = (dHeight - outputHeight) / 2;
 
     updateRegisters();
 
     // All coordinates are in desktop-local space (0,0 = top-left of desktop area)
-    // Left side: Disassembly (full height)
-    disasmWindow = new TDisasmWindow(TRect(0, 0, leftWidth, dHeight - outputHeight));
+    // Left side: Disassembly (top half) + Source (bottom half)
+    disasmWindow = new TDisasmWindow(TRect(0, 0, leftWidth, disasmHeight));
     deskTop->insert(disasmWindow);
+
+    sourceWindow = new TSourceWindow(TRect(0, disasmHeight, leftWidth, dHeight - outputHeight));
+    deskTop->insert(sourceWindow);
 
     // Right column (top to bottom): Registers, Stack, Memory
     regsWindow = new TRegsWindow(TRect(leftWidth, 0, dWidth, regsHeight));
@@ -154,6 +160,7 @@ TMenuBar *TDebugApp::initMenuBar(TRect r)
         *new TMenuItem("~D~isassembly", cmViewDisasm, kbNoKey) +
         *new TMenuItem("~M~emory", cmViewMemory, kbNoKey) +
         *new TMenuItem("~S~tack", cmViewStack, kbNoKey) +
+        *new TMenuItem("S~o~urce", cmViewSource, kbNoKey) +
         *new TMenuItem("~O~utput", cmViewOutput, kbNoKey);
     TSubMenu& subHelp =
       *new TSubMenu("~H~elp", 0) +
@@ -197,6 +204,9 @@ void TDebugApp::handleEvent(TEvent &event)
                 clearEvent(event); break;
             case cmViewStack:
                 if (stackWindow) { stackWindow->show(); stackWindow->focus(); }
+                clearEvent(event); break;
+            case cmViewSource:
+                if (sourceWindow) { sourceWindow->show(); sourceWindow->focus(); }
                 clearEvent(event); break;
             case cmViewOutput:
                 if (outputWindow) { outputWindow->show(); outputWindow->focus(); }
@@ -584,5 +594,6 @@ void TDebugApp::redrawAll()
     if (disasmWindow) disasmWindow->redraw();
     if (memWindow) memWindow->redraw();
     if (stackWindow) stackWindow->redraw();
+    if (sourceWindow) sourceWindow->redraw();
     if (outputWindow) outputWindow->redraw();
 }

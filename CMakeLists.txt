@@ -148,6 +148,7 @@ if(BUILD_DEBUGGER)
         debugger/ptrace_wrapper.c
         debugger/ldt_access.c
         debugger/disasm.c
+        debugger/dwarf_info.c
     )
     target_include_directories(td2ine PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include
