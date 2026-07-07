@@ -731,7 +731,7 @@ static __attribute__((noreturn)) void lxTerminate(const uint32 exitcode)
     _exit((int) (exitcode & 0xFF));
 } // lxTerminate
 
-static __attribute__((noreturn)) void endLxProcess(const uint32 exitcode)
+static __attribute__((noreturn, used)) void endLxProcess(const uint32 exitcode)
 {
     if (GLoaderState.dosExit)
         GLoaderState.dosExit(1, exitcode);  // let exit lists run. Should call lxTerminate!
