@@ -237,11 +237,11 @@ int handleSoftwareStepBreakpoint(void)
     return 0;
 }
 
-static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
+static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int step_over)
 {
     int is_16bit = !g_debug.is_lx_mode;
 
-    printf("=== Auto-Step: %d steps ===\n\n", num_steps);
+    printf("=== Auto-Step: %d steps (mode: %s) ===\n\n", num_steps, step_over ? "step-over" : "step-into");
 
     for (int step = 0; step < num_steps; step++) {
         struct user_regs_struct regs;
@@ -266,6 +266,12 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
         printf("--- Step %d ---\n", step);
         printf("  CS:IP=%04X:%04X  linear=0x%08X  mem_ok=%d\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, mem_ok);
 
+        DisasmInstruction instr;
+        memset(&instr, 0, sizeof(instr));
+        if (mem_ok == 0) {
+            disasm_instruction(code, baseAddr, &instr, is_16bit);
+        }
+
         printf("  Bytes: ");
         for (int j = 0; j < 16; j++) {
             printf("%02X ", code[j]);
@@ -273,9 +279,6 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
         printf("\n");
 
         if (mem_ok == 0) {
-            DisasmInstruction instr;
-            memset(&instr, 0, sizeof(instr));
-            disasm_instruction(code, baseAddr, &instr, is_16bit);
             if (instr.size > 0) {
                 if (instr.api_name) {
                     printf("  ASM:   %s %s  ; %s\n", instr.mnemonic, instr.op_str, instr.api_name);
@@ -329,32 +332,43 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
             uint8_t saved_next_byte = 0;
             uint32_t next_linear = 0;
             int bp_set = 0;
-            
-            if (is_16bit && shared) {
-                // Software single-step for 16-bit mode
-                next_linear = calculateNextIP(shared, &regs, is_16bit);
-                
-                // Read and save the byte at next instruction
+
+            int is_call = (instr.size > 0 &&
+                          (strcmp(instr.mnemonic, "call") == 0 ||
+                           strcmp(instr.mnemonic, "callw") == 0 ||
+                           strcmp(instr.mnemonic, "call_far") == 0 ||
+                           strcmp(instr.mnemonic, "lcall") == 0 ||
+                           strcmp(instr.mnemonic, "int") == 0));
+
+            if (step_over && is_call) {
+                // Step over CALL-type instruction: set breakpoint at return address
+                next_linear = baseAddr + instr.size;
                 uint8_t temp_byte;
                 if (ptrace_read_memory(pid, (void *)(uintptr_t)next_linear, &temp_byte, 1) == 0) {
                     saved_next_byte = temp_byte;
-                    // Write INT3 breakpoint
                     uint8_t int3 = 0xCC;
                     if (ptrace_write_memory(pid, (void *)(uintptr_t)next_linear, &int3, 1) == 0) {
                         bp_set = 1;
                     }
                 }
-            }
-            
-            // Continue or single-step
-            if (is_16bit && bp_set) {
                 ptrace(PTRACE_CONT, pid, NULL, NULL);
-            } else if (!is_16bit) {
-                ptrace_single_step(pid);
+            } else if (is_16bit && shared) {
+                // NE mode step-into: software single-step via calculateNextIP
+                next_linear = calculateNextIP(shared, &regs, is_16bit);
+                uint8_t temp_byte;
+                if (ptrace_read_memory(pid, (void *)(uintptr_t)next_linear, &temp_byte, 1) == 0) {
+                    saved_next_byte = temp_byte;
+                    uint8_t int3 = 0xCC;
+                    if (ptrace_write_memory(pid, (void *)(uintptr_t)next_linear, &int3, 1) == 0) {
+                        bp_set = 1;
+                    }
+                }
+                ptrace(PTRACE_CONT, pid, NULL, NULL);
             } else {
-                ptrace(PTRACE_CONT, pid, NULL, NULL);
+                // LX mode step-into: hardware single-step
+                ptrace_single_step(pid);
             }
-            
+
             int status;
             if (waitpid(pid, &status, 0) < 0) {
                 fprintf(stderr, "Step %d: waitpid failed\n", step);
@@ -368,9 +382,9 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
                 fprintf(stderr, "Step %d: process not stopped\n", step);
                 break;
             }
-            
+
             // If we set a breakpoint and hit it, restore the saved byte
-            if (is_16bit && bp_set && next_linear != 0) {
+            if (bp_set && next_linear != 0) {
                 if (ptrace_write_memory(pid, (void *)(uintptr_t)next_linear, &saved_next_byte, 1) == 0) {
                     if (g_debug.is_lx_mode) {
                         regs.eip = next_linear;
@@ -386,7 +400,7 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared)
                     setRegisters(pid, &regs);
                 }
             }
-            
+
             ptrace(PTRACE_GETREGS, pid, NULL, &regs);
             eip = (uint32_t)regs.eip;
             cs = (uint16_t)(regs.xcs & 0xFFFF);
@@ -411,6 +425,7 @@ int main(int argc, char **argv)
 {
     int test_step_over = 0;
     int autostep_count = 0;
+    int autostep_step_over = 0;  // 0 = step into (default), 1 = step over
     int real_argc = argc;
 
     for (int i = 1; i < argc; i++) {
@@ -423,6 +438,18 @@ int main(int argc, char **argv)
             real_argc -= 2;
             i++;
         }
+        if (strcmp(argv[i], "--autostep-mode") == 0 && i + 1 < argc) {
+            if (strcmp(argv[i + 1], "over") == 0) {
+                autostep_step_over = 1;
+            } else if (strcmp(argv[i + 1], "into") == 0) {
+                autostep_step_over = 0;
+            } else {
+                fprintf(stderr, "Error: --autostep-mode expects 'over' or 'into'\n");
+                return 1;
+            }
+            real_argc -= 2;
+            i++;
+        }
     }
 
     if (test_step_over) {
@@ -430,6 +457,7 @@ int main(int argc, char **argv)
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--test-step-over") == 0) continue;
             if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip number
+            if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip mode arg
             program = argv[i]; break;
         }
         if (!program) { fprintf(stderr, "Error: No program specified\n"); return 1; }
@@ -438,9 +466,10 @@ int main(int argc, char **argv)
     }
 
     if (real_argc < 2) {
-        fprintf(stderr, "Usage: %s [--test-step-over] [--autostep N] <program> [args...]\n", argv[0]);
-        fprintf(stderr, "  --test-step-over  Test step-over functionality\n");
-        fprintf(stderr, "  --autostep N      Auto-step through N instructions and print assembly\n");
+        fprintf(stderr, "Usage: %s [--test-step-over] [--autostep N] [--autostep-mode over|into] <program> [args...]\n", argv[0]);
+        fprintf(stderr, "  --test-step-over    Test step-over functionality\n");
+        fprintf(stderr, "  --autostep N        Auto-step through N instructions and print assembly\n");
+        fprintf(stderr, "  --autostep-mode M   Stepping mode for autostep: 'into' (default) or 'over'\n");
         return 1;
     }
 
@@ -460,6 +489,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--test-step-over") == 0) continue;
         if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip the number too
+        if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip the mode too
         program = argv[i];
         prog_idx = i;
         break;
@@ -545,7 +575,7 @@ int main(int argc, char **argv)
     }
 
     if (autostep_count > 0) {
-        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state);
+        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over);
         disasm_cleanup();
         ldt_close_shared(g_debug.shared_state);
         dwarf_cleanup();
