@@ -306,6 +306,38 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
             printf("  ASM:   [memory read failed]\n");
         }
 
+        // Display stack contents
+        {
+            uint16_t ss = (uint16_t)(regs.xss & 0xFFFF);
+            uint32_t esp = (uint32_t)regs.esp;
+            printf("  Stack: SS:SP=%04X:%04X", ss, (uint16_t)(esp & 0xFFFF));
+            if (is_16bit && shared) {
+                for (int s = 0; s < 8; s++) {
+                    uint16_t sp_off = (uint16_t)(esp + s * 2);
+                    uint32_t linear_sp = linearAddressFromSelectors(shared, ss, sp_off);
+                    uint8_t stack_bytes[2];
+                    if (linear_sp != 0 && ptrace_read_memory(pid, (void *)(uintptr_t)linear_sp, stack_bytes, 2) == 0) {
+                        uint16_t val = stack_bytes[0] | (stack_bytes[1] << 8);
+                        printf("  [%04X]=%04X", sp_off, val);
+                    } else {
+                        printf("  [%04X]=????", sp_off);
+                    }
+                }
+            } else {
+                for (int s = 0; s < 8; s++) {
+                    uint32_t stack_addr = esp + s * 4;
+                    uint8_t stack_bytes[4];
+                    if (ptrace_read_memory(pid, (void *)(uintptr_t)stack_addr, stack_bytes, 4) == 0) {
+                        uint32_t val = stack_bytes[0] | (stack_bytes[1] << 8) | (stack_bytes[2] << 16) | (stack_bytes[3] << 24);
+                        printf("  [%08X]=%08X", stack_addr, val);
+                    } else {
+                        printf("  [%08X]=????????", stack_addr);
+                    }
+                }
+            }
+            printf("\n");
+        }
+
         if (shared && shared->breakpoint_active) {
             uint32_t entry_eip = shared->entry_eip;
             uint8_t saved_byte = shared->entry_byte;
@@ -400,6 +432,8 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
             // If we set a breakpoint and hit it, restore the saved byte
             if (bp_set && next_linear != 0) {
                 if (ptrace_write_memory(pid, (void *)(uintptr_t)next_linear, &saved_next_byte, 1) == 0) {
+                    // Re-read registers to get post-instruction values (ESP, EAX, etc.)
+                    getRegisters(pid, &regs);
                     if (g_debug.is_lx_mode) {
                         regs.eip = next_linear;
                     } else {
