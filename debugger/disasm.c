@@ -268,6 +268,12 @@ int disasm_buffer(const uint8_t *code, size_t len, uint32_t start_addr,
             if (*endptr == '\0' || *endptr == 'h') {
                 instrs[i].api_name = (char*)resolve_os2_api(target);
             }
+            if (instrs[i].op_str[0] == '0' && instrs[i].op_str[1] == 'x') {
+                target = (uint32_t)strtoul(insn[i].op_str, &endptr, 0);
+                if (target != 0 && !instrs[i].api_name) {
+                    instrs[i].api_name = (char*)resolve_os2_api(target);
+                }
+            }
         }
     }
     
