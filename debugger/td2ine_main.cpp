@@ -280,15 +280,48 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
         printf("--- Step %d ---\n", step);
         printf("  CS:IP=%04X:%04X  linear=0x%08X  mem_ok=%d\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, mem_ok);
 
+        // Display registers
+        if (g_debug.is_lx_mode) {
+            printf("  EAX=%08X EBX=%08X ECX=%08X EDX=%08X\n",
+                    (uint32_t)regs.eax, (uint32_t)regs.ebx, (uint32_t)regs.ecx, (uint32_t)regs.edx);
+            printf("  ESI=%08X EDI=%08X EBP=%08X ESP=%08X\n",
+                    (uint32_t)regs.esi, (uint32_t)regs.edi, (uint32_t)regs.ebp, (uint32_t)regs.esp);
+            printf("  EIP=%08X EFL=%08X CS=%04X DS=%04X ES=%04X SS=%04X\n",
+                    (uint32_t)regs.eip, (uint32_t)regs.eflags,
+                    (uint16_t)regs.xcs, (uint16_t)regs.xds, (uint16_t)regs.xes, (uint16_t)regs.xss);
+        } else {
+            printf("  AX=%04X BX=%04X CX=%04X DX=%04X\n",
+                    (uint16_t)regs.eax, (uint16_t)regs.ebx, (uint16_t)regs.ecx, (uint16_t)regs.edx);
+            printf("  SI=%04X DI=%04X BP=%04X SP=%04X\n",
+                    (uint16_t)regs.esi, (uint16_t)regs.edi, (uint16_t)regs.ebp, (uint16_t)regs.esp);
+            printf("  IP=%04X FL=%04X CS=%04X DS=%04X ES=%04X SS=%04X\n",
+                    (uint16_t)regs.eip, (uint16_t)regs.eflags,
+                    (uint16_t)regs.xcs, (uint16_t)regs.xds, (uint16_t)regs.xes, (uint16_t)regs.xss);
+        }
+        printf("  CF=%d PF=%d AF=%d ZF=%d SF=%d TF=%d IF=%d DF=%d OF=%d\n",
+                (int)((regs.eflags >> 0) & 1), (int)((regs.eflags >> 2) & 1),
+                (int)((regs.eflags >> 4) & 1), (int)((regs.eflags >> 6) & 1),
+                (int)((regs.eflags >> 7) & 1), (int)((regs.eflags >> 8) & 1),
+                (int)((regs.eflags >> 9) & 1), (int)((regs.eflags >> 10) & 1),
+                (int)((regs.eflags >> 11) & 1));
+
         DisasmInstruction instr;
         memset(&instr, 0, sizeof(instr));
         if (mem_ok == 0) {
             disasm_instruction(code, baseAddr, &instr, is_16bit);
         }
 
+        // Display instruction bytes (matching TUI: show instr.bytes for instr.size, up to 8)
         printf("  Bytes: ");
-        for (int j = 0; j < 16; j++) {
-            printf("%02X ", code[j]);
+        if (mem_ok == 0 && instr.size > 0) {
+            for (int j = 0; j < instr.size && j < 8; j++) {
+                printf("%02X ", instr.bytes[j]);
+            }
+            for (int j = instr.size; j < 8; j++) {
+                printf("   ");
+            }
+        } else {
+            printf("???????? ");
         }
         printf("\n");
 
