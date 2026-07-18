@@ -54,7 +54,7 @@ uint32_t g_sw_step_addr = 0;
 int g_sw_step_active = 0;
 
 // Calculate next instruction address for software single-stepping
-uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit)
+uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit, int step_into_far_calls)
 {
     uint32_t eip = (uint32_t)regs->eip;
     uint16_t cs = (uint16_t)(regs->xcs & 0xFFFF);
@@ -83,10 +83,24 @@ uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs
     // Calculate next IP based on instruction type
     const char *mnem = instr.mnemonic;
     
-    // Far calls (lcall): step OVER - set breakpoint at return address
-    // OS/2 API calls (lcall 0xFFEF:xxxx) go to protected-mode call gates
-    // that we can't meaningfully step into. Always step over far calls.
+    // Far calls (lcall): step into user far calls, step over OS/2 API calls
+    // OS/2 API calls (lcall 0xFFFF:xxxx) go to protected-mode call gates
+    // that we can't meaningfully step into.
     if (strstr(mnem, "lcall")) {
+        uint16_t target_seg = 0;
+        uint16_t target_off = 0;
+        if (step_into_far_calls &&
+            sscanf(instr.op_str, "%hx,%hx", &target_seg, &target_off) == 2 &&
+            target_seg != 0xFFFF && target_seg != 0xFFEF) {
+            // User far call: step into by setting breakpoint at target
+            if (is_16bit && shared) {
+                uint32_t target_linear = linearAddressFromSelectors(shared, target_seg, target_off);
+                if (target_linear != 0) {
+                    return target_linear;
+                }
+            }
+        }
+        // OS/2 API call or can't resolve target: step over
         return linear_eip + instr.size;
     }
 
@@ -168,7 +182,7 @@ int doSoftwareStep(void)
     getRegisters(g_debug.pid, &regs);
 
     int is_16bit = !g_debug.is_lx_mode;
-    uint32_t next_linear = calculateNextIP(g_debug.shared_state, &regs, is_16bit);
+    uint32_t next_linear = calculateNextIP(g_debug.shared_state, &regs, is_16bit, 1);
 
     // Save the byte at next instruction address
     uint8_t temp_byte;
@@ -354,7 +368,7 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
                 ptrace(PTRACE_CONT, pid, NULL, NULL);
             } else if (is_16bit && shared) {
                 // NE mode step-into: software single-step via calculateNextIP
-                next_linear = calculateNextIP(shared, &regs, is_16bit);
+                next_linear = calculateNextIP(shared, &regs, is_16bit, !step_over);
                 uint8_t temp_byte;
                 if (ptrace_read_memory(pid, (void *)(uintptr_t)next_linear, &temp_byte, 1) == 0) {
                     saved_next_byte = temp_byte;
