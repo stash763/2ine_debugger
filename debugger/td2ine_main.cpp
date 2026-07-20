@@ -54,7 +54,7 @@ uint32_t g_sw_step_addr = 0;
 int g_sw_step_active = 0;
 
 // Calculate next instruction address for software single-stepping
-uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit, int step_into_far_calls)
+uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit, int step_into_far_calls, int step_into_os2_apis)
 {
     uint32_t eip = (uint32_t)regs->eip;
     uint16_t cs = (uint16_t)(regs->xcs & 0xFFFF);
@@ -85,22 +85,34 @@ uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs
     
     // Far calls (lcall): step into user far calls, step over OS/2 API calls
     // OS/2 API calls (lcall 0xFFFF:xxxx) go to protected-mode call gates
-    // that we can't meaningfully step into.
+    // that we can't meaningfully step into unless step_into_os2_apis is set.
     if (strstr(mnem, "lcall")) {
         uint16_t target_seg = 0;
         uint16_t target_off = 0;
-        if (step_into_far_calls &&
-            sscanf(instr.op_str, "%hx,%hx", &target_seg, &target_off) == 2 &&
-            target_seg != 0xFFFF && target_seg != 0xFFEF) {
-            // User far call: step into by setting breakpoint at target
-            if (is_16bit && shared) {
-                uint32_t target_linear = linearAddressFromSelectors(shared, target_seg, target_off);
-                if (target_linear != 0) {
-                    return target_linear;
+        if (sscanf(instr.op_str, "%hx,%hx", &target_seg, &target_off) == 2) {
+            int is_os2_api = (target_seg == 0xFFFF || target_seg == 0xFFEF);
+
+            if (is_os2_api && step_into_os2_apis) {
+                // Step into OS/2 API call gate
+                if (is_16bit && shared) {
+                    uint32_t target_linear = linearAddressFromSelectors(shared, target_seg, target_off);
+                    if (target_linear != 0) {
+                        return target_linear;
+                    }
+                }
+            }
+
+            if (!is_os2_api && step_into_far_calls) {
+                // User far call: step into by setting breakpoint at target
+                if (is_16bit && shared) {
+                    uint32_t target_linear = linearAddressFromSelectors(shared, target_seg, target_off);
+                    if (target_linear != 0) {
+                        return target_linear;
+                    }
                 }
             }
         }
-        // OS/2 API call or can't resolve target: step over
+        // Step over
         return linear_eip + instr.size;
     }
 
@@ -122,6 +134,10 @@ uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs
     
     // Near JMP/CALL: operand is usually a relative displacement or absolute address
     if (strstr(mnem, "jmp") || strstr(mnem, "call")) {
+        // Step over OS/2 API calls (near call to API thunk) unless explicitly stepping into
+        if (instr.api_name && !step_into_os2_apis) {
+            return linear_eip + instr.size;
+        }
         char *endptr;
         uint32_t target = (uint32_t)strtoul(instr.op_str, &endptr, 16);
         if (*endptr == '\0' || *endptr == 'h') {
@@ -182,7 +198,7 @@ int doSoftwareStep(void)
     getRegisters(g_debug.pid, &regs);
 
     int is_16bit = !g_debug.is_lx_mode;
-    uint32_t next_linear = calculateNextIP(g_debug.shared_state, &regs, is_16bit, 1);
+    uint32_t next_linear = calculateNextIP(g_debug.shared_state, &regs, is_16bit, 1, 0);
 
     // Save the byte at next instruction address
     uint8_t temp_byte;
@@ -251,11 +267,13 @@ int handleSoftwareStepBreakpoint(void)
     return 0;
 }
 
-static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int step_over)
+static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int step_over, int step_into_os2_apis)
 {
     int is_16bit = !g_debug.is_lx_mode;
 
-    printf("=== Auto-Step: %d steps (mode: %s) ===\n\n", num_steps, step_over ? "step-over" : "step-into");
+    printf("=== Auto-Step: %d steps (mode: %s, OS/2 API: %s) ===\n\n", num_steps,
+           step_over ? "step-over" : "step-into",
+           step_into_os2_apis ? "step-into" : "step-over");
 
     for (int step = 0; step < num_steps; step++) {
         struct user_regs_struct regs;
@@ -433,7 +451,7 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
                 ptrace(PTRACE_CONT, pid, NULL, NULL);
             } else if (is_16bit && shared) {
                 // NE mode step-into: software single-step via calculateNextIP
-                next_linear = calculateNextIP(shared, &regs, is_16bit, !step_over);
+                next_linear = calculateNextIP(shared, &regs, is_16bit, !step_over, step_into_os2_apis);
                 uint8_t temp_byte;
                 if (ptrace_read_memory(pid, (void *)(uintptr_t)next_linear, &temp_byte, 1) == 0) {
                     saved_next_byte = temp_byte;
@@ -507,6 +525,7 @@ int main(int argc, char **argv)
     int test_step_over = 0;
     int autostep_count = 0;
     int autostep_step_over = 0;  // 0 = step into (default), 1 = step over
+    int autostep_into_api = 0;  // 0 = step over OS/2 API calls (default), 1 = step into
     int real_argc = argc;
 
     for (int i = 1; i < argc; i++) {
@@ -531,6 +550,10 @@ int main(int argc, char **argv)
             real_argc -= 2;
             i++;
         }
+        if (strcmp(argv[i], "--autostep-into-api") == 0) {
+            autostep_into_api = 1;
+            real_argc--;
+        }
     }
 
     if (test_step_over) {
@@ -539,6 +562,7 @@ int main(int argc, char **argv)
             if (strcmp(argv[i], "--test-step-over") == 0) continue;
             if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip number
             if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip mode arg
+            if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
             program = argv[i]; break;
         }
         if (!program) { fprintf(stderr, "Error: No program specified\n"); return 1; }
@@ -547,10 +571,11 @@ int main(int argc, char **argv)
     }
 
     if (real_argc < 2) {
-        fprintf(stderr, "Usage: %s [--test-step-over] [--autostep N] [--autostep-mode over|into] <program> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--test-step-over] [--autostep N] [--autostep-mode over|into] [--autostep-into-api] <program> [args...]\n", argv[0]);
         fprintf(stderr, "  --test-step-over    Test step-over functionality\n");
         fprintf(stderr, "  --autostep N        Auto-step through N instructions and print assembly\n");
         fprintf(stderr, "  --autostep-mode M   Stepping mode for autostep: 'into' (default) or 'over'\n");
+        fprintf(stderr, "  --autostep-into-api Step into OS/2 API calls (default: step over them)\n");
         return 1;
     }
 
@@ -571,6 +596,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--test-step-over") == 0) continue;
         if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip the number too
         if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip the mode too
+        if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
         program = argv[i];
         prog_idx = i;
         break;
@@ -656,7 +682,7 @@ int main(int argc, char **argv)
     }
 
     if (autostep_count > 0) {
-        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over);
+        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over, autostep_into_api);
         disasm_cleanup();
         ldt_close_shared(g_debug.shared_state);
         dwarf_cleanup();

@@ -84,7 +84,7 @@ uint32_t linearAddressFromSelectors(DebugSharedState *state, uint16_t cs, uint16
 pid_t start_debuggee(const char *program, char **argv);
 
 // Software single-step functions (implemented in td2ine_main.cpp)
-uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit, int step_into_far_calls = 0);
+uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs, int is_16bit, int step_into_far_calls = 0, int step_into_os2_apis = 0);
 int doSoftwareStep(void);
 int handleSoftwareStepBreakpoint(void);
 
