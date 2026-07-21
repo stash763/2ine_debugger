@@ -149,6 +149,7 @@ if(BUILD_DEBUGGER)
         debugger/ldt_access.c
         debugger/disasm.c
         debugger/dwarf_info.c
+        debugger/symbol_map.cpp
     )
     target_include_directories(td2ine PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}/capstone/include

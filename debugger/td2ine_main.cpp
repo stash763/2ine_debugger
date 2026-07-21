@@ -5,6 +5,7 @@
  */
 
 #include "td2ine.h"
+#include "symbol_map.h"
 #include <sys/mman.h>
 
 #define Uses_TApplication
@@ -267,13 +268,61 @@ int handleSoftwareStepBreakpoint(void)
     return 0;
 }
 
-static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int step_over, int step_into_os2_apis)
+static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int step_over, int step_into_os2_apis,
+                          int trace_calls_only, int loop_detect)
 {
     int is_16bit = !g_debug.is_lx_mode;
 
-    printf("=== Auto-Step: %d steps (mode: %s, OS/2 API: %s) ===\n\n", num_steps,
+    // Build segment base table for symbol lookup
+    // For NE executables, the LDT index = addr >> 16, and selector = (index << 3) | 3
+    // We scan non-zero LDT slots and build a table: LDT index → base address
+    // Then at lookup time, we try each NE segment number (1-15) with the computed offset
+    uint32_t seg_bases[16] = {0};
+    if (shared && is_16bit && g_symbol_map.loaded) {
+        // Scan LDT for non-zero entries (these are the loaded NE segments)
+        // NE segments are loaded in order: seg 1, seg 2, seg 3...
+        // We sort by base address to map them to NE segment numbers
+        uint32_t bases[16] = {0};
+        int base_count = 0;
+        for (int i = 0; i < 8192 && base_count < 16; i++) {
+            if (shared->selectors[i] != 0) {
+                // Check if this base is already recorded
+                int found = 0;
+                for (int j = 0; j < base_count; j++) {
+                    if (bases[j] == shared->selectors[i]) { found = 1; break; }
+                }
+                if (!found) {
+                    bases[base_count++] = shared->selectors[i];
+                }
+            }
+        }
+        // Sort by base address (simple insertion sort)
+        for (int i = 1; i < base_count; i++) {
+            uint32_t key = bases[i];
+            int j = i - 1;
+            while (j >= 0 && bases[j] > key) {
+                bases[j+1] = bases[j];
+                j--;
+            }
+            bases[j+1] = key;
+        }
+        // Assign to seg_bases: segment 1 = first loaded, segment 2 = second, etc.
+        for (int i = 0; i < base_count && i < 15; i++) {
+            seg_bases[i+1] = bases[i];
+        }
+    }
+
+    // Loop detection state
+    #define LOOP_HISTORY 1024
+    uint32_t loop_history[LOOP_HISTORY];
+    int loop_hist_count = 0;
+    int loop_detected = 0;
+
+    printf("=== Auto-Step: %d steps (mode: %s, OS/2 API: %s%s%s) ===\n\n", num_steps,
            step_over ? "step-over" : "step-into",
-           step_into_os2_apis ? "step-into" : "step-over");
+           step_into_os2_apis ? "step-into" : "step-over",
+           trace_calls_only ? ", trace-calls" : "",
+           loop_detect ? ", loop-detect" : "");
 
     for (int step = 0; step < num_steps; step++) {
         struct user_regs_struct regs;
@@ -291,12 +340,107 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
             if (linear) baseAddr = linear;
         }
 
+        // Symbol lookup
+        const char *sym_name = NULL;
+        int sym_offset = 0;
+        if (g_symbol_map.loaded) {
+            // Find which segment this linear address belongs to
+            for (int s = 1; s < 16; s++) {
+                if (seg_bases[s] == 0) continue;
+                if (baseAddr >= seg_bases[s] && baseAddr < seg_bases[s] + 0x10000) {
+                    uint16_t off = (uint16_t)(baseAddr - seg_bases[s]);
+                    sym_name = symbol_map_lookup((uint16_t)s, off, &sym_offset);
+                    break;
+                }
+            }
+        }
+
+        // Loop detection
+        if (loop_detect) {
+            if (loop_hist_count < LOOP_HISTORY) {
+                loop_history[loop_hist_count++] = baseAddr;
+            } else {
+                // Shift and add
+                for (int i = 0; i < LOOP_HISTORY - 1; i++)
+                    loop_history[i] = loop_history[i + 1];
+                loop_history[LOOP_HISTORY - 1] = baseAddr;
+            }
+
+            // Check for repeating sequence of length 2-32
+            if (loop_hist_count >= 6) {
+                for (int seqlen = 2; seqlen <= 32 && !loop_detected; seqlen++) {
+                    int start = loop_hist_count - seqlen * 3; // need 3 repetitions
+                    if (start < 0) continue;
+                    int match = 1;
+                    for (int r = 0; r < 3 && match; r++) {
+                        for (int j = 0; j < seqlen && match; j++) {
+                            if (loop_history[start + r * seqlen + j] != loop_history[start + j])
+                                match = 0;
+                        }
+                    }
+                    if (match) {
+                        loop_detected = 1;
+                        fprintf(stderr, "\n=== LOOP DETECTED (sequence length %d, starting at step %d) ===\n",
+                                seqlen, step - seqlen * 2);
+                        for (int j = 0; j < seqlen; j++) {
+                            uint32_t addr = loop_history[start + j];
+                            const char *s = NULL;
+                            int o = 0;
+                            for (int s2 = 1; s2 < 16; s2++) {
+                                if (seg_bases[s2] && addr >= seg_bases[s2] && addr < seg_bases[s2] + 0x10000) {
+                                    s = symbol_map_lookup((uint16_t)s2, (uint16_t)(addr - seg_bases[s2]), &o);
+                                    break;
+                                }
+                            }
+                            if (s) fprintf(stderr, "  0x%08X  %s+0x%X\n", addr, s, o);
+                            else fprintf(stderr, "  0x%08X  (unknown)\n", addr);
+                        }
+                        fprintf(stderr, "=== Last %d steps before loop ===\n", seqlen * 3);
+                    }
+                }
+            }
+        }
+
         uint8_t code[32];
         memset(code, 0xCC, sizeof(code));
         int mem_ok = ptrace_read_memory(pid, (void *)(uintptr_t)baseAddr, code, sizeof(code));
 
+        DisasmInstruction instr;
+        memset(&instr, 0, sizeof(instr));
+        if (mem_ok == 0) {
+            disasm_instruction(code, baseAddr, &instr, is_16bit);
+        }
+
+        // Determine if this is a call or return instruction
+        int is_call = (instr.size > 0 &&
+                      (strcmp(instr.mnemonic, "call") == 0 ||
+                       strcmp(instr.mnemonic, "callw") == 0 ||
+                       strcmp(instr.mnemonic, "call_far") == 0 ||
+                       strcmp(instr.mnemonic, "lcall") == 0));
+        int is_ret = (instr.size > 0 &&
+                     (strcmp(instr.mnemonic, "ret") == 0 ||
+                      strcmp(instr.mnemonic, "retf") == 0 ||
+                      strcmp(instr.mnemonic, "retfar") == 0 ||
+                      strcmp(instr.mnemonic, "iret") == 0 ||
+                      strcmp(instr.mnemonic, "iretw") == 0));
+
+        // In trace-calls mode, only print calls and returns
+        if (trace_calls_only && !is_call && !is_ret) {
+            // Skip printing this step, but still execute it
+            goto execute_step;
+        }
+
         printf("--- Step %d ---\n", step);
-        printf("  CS:IP=%04X:%04X  linear=0x%08X  mem_ok=%d\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, mem_ok);
+
+        // Symbol annotation in header line
+        if (sym_name) {
+            if (sym_offset == 0)
+                printf("  CS:IP=%04X:%04X  linear=0x%08X  %s\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, sym_name);
+            else
+                printf("  CS:IP=%04X:%04X  linear=0x%08X  %s+0x%X\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, sym_name, sym_offset);
+        } else {
+            printf("  CS:IP=%04X:%04X  linear=0x%08X  mem_ok=%d\n", cs, (uint16_t)(eip & 0xFFFF), baseAddr, mem_ok);
+        }
 
         // Display registers
         if (g_debug.is_lx_mode) {
@@ -322,12 +466,6 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
                 (int)((regs.eflags >> 7) & 1), (int)((regs.eflags >> 8) & 1),
                 (int)((regs.eflags >> 9) & 1), (int)((regs.eflags >> 10) & 1),
                 (int)((regs.eflags >> 11) & 1));
-
-        DisasmInstruction instr;
-        memset(&instr, 0, sizeof(instr));
-        if (mem_ok == 0) {
-            disasm_instruction(code, baseAddr, &instr, is_16bit);
-        }
 
         // Display instruction bytes (matching TUI: show instr.bytes for instr.size, up to 8)
         printf("  Bytes: ");
@@ -425,6 +563,7 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
             }
         }
 
+    execute_step:
         if (step < num_steps - 1) {
             uint8_t saved_next_byte = 0;
             uint32_t next_linear = 0;
@@ -526,6 +665,9 @@ int main(int argc, char **argv)
     int autostep_count = 0;
     int autostep_step_over = 0;  // 0 = step into (default), 1 = step over
     int autostep_into_api = 0;  // 0 = step over OS/2 API calls (default), 1 = step into
+    int trace_calls_only = 0;  // 1 = only print calls/returns
+    int loop_detect = 0;        // 1 = detect loops in autostep
+    const char *symbol_map_file = NULL;
     int real_argc = argc;
 
     for (int i = 1; i < argc; i++) {
@@ -554,6 +696,19 @@ int main(int argc, char **argv)
             autostep_into_api = 1;
             real_argc--;
         }
+        if (strcmp(argv[i], "--trace-calls") == 0) {
+            trace_calls_only = 1;
+            real_argc--;
+        }
+        if (strcmp(argv[i], "--loop-detect") == 0) {
+            loop_detect = 1;
+            real_argc--;
+        }
+        if (strcmp(argv[i], "--symbols") == 0 && i + 1 < argc) {
+            symbol_map_file = argv[i + 1];
+            real_argc -= 2;
+            i++;
+        }
     }
 
     if (test_step_over) {
@@ -563,6 +718,9 @@ int main(int argc, char **argv)
             if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip number
             if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip mode arg
             if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
+            if (strcmp(argv[i], "--trace-calls") == 0) continue;
+            if (strcmp(argv[i], "--loop-detect") == 0) continue;
+            if (strcmp(argv[i], "--symbols") == 0) { i++; continue; } // skip map file
             program = argv[i]; break;
         }
         if (!program) { fprintf(stderr, "Error: No program specified\n"); return 1; }
@@ -571,11 +729,14 @@ int main(int argc, char **argv)
     }
 
     if (real_argc < 2) {
-        fprintf(stderr, "Usage: %s [--test-step-over] [--autostep N] [--autostep-mode over|into] [--autostep-into-api] <program> [args...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [options] <program> [args...]\n", argv[0]);
         fprintf(stderr, "  --test-step-over    Test step-over functionality\n");
         fprintf(stderr, "  --autostep N        Auto-step through N instructions and print assembly\n");
         fprintf(stderr, "  --autostep-mode M   Stepping mode for autostep: 'into' (default) or 'over'\n");
         fprintf(stderr, "  --autostep-into-api Step into OS/2 API calls (default: step over them)\n");
+        fprintf(stderr, "  --trace-calls       Only print call/return instructions (with symbols)\n");
+        fprintf(stderr, "  --loop-detect       Detect loops in autostep (repeated address sequences)\n");
+        fprintf(stderr, "  --symbols <file>     Load wlink map file for symbol resolution\n");
         return 1;
     }
 
@@ -597,6 +758,9 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip the number too
         if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip the mode too
         if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
+        if (strcmp(argv[i], "--trace-calls") == 0) continue;
+        if (strcmp(argv[i], "--loop-detect") == 0) continue;
+        if (strcmp(argv[i], "--symbols") == 0) { i++; continue; } // skip the map file
         program = argv[i];
         prog_idx = i;
         break;
@@ -681,8 +845,14 @@ int main(int argc, char **argv)
         g_debug_regs = g_debug.regs;
     }
 
+    // Load symbol map if requested
+    if (symbol_map_file) {
+        symbol_map_load(symbol_map_file);
+    }
+
     if (autostep_count > 0) {
-        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over, autostep_into_api);
+        run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over, autostep_into_api,
+                     trace_calls_only, loop_detect);
         disasm_cleanup();
         ldt_close_shared(g_debug.shared_state);
         dwarf_cleanup();
