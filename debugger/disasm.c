@@ -196,13 +196,17 @@ int disasm_instruction(const uint8_t *code, uint32_t address, DisasmInstruction 
         uint16_t target_seg = 0;
         uint16_t target_off = 0;
         if (sscanf(insn->op_str, "%hx,%hx", &target_seg, &target_off) == 2) {
-            const char *api_name = resolve_lcall_api(target_seg, target_off);
-            if (api_name) {
-                instr->api_name = (char*)api_name;
+            // Only tag as OS/2 API if the segment is a known call-gate selector
+            // (0xFFFF or 0xFFEF). Other far calls are user-code far calls.
+            int is_os2_call_gate = (target_seg == 0xFFFF || target_seg == 0xFFEF);
+            if (is_os2_call_gate) {
+                const char *api_name = resolve_lcall_api(target_seg, target_off);
+                if (api_name) {
+                    instr->api_name = (char*)api_name;
+                } else {
+                    instr->api_name = (char*)"OS/2_API";
+                }
             }
-        }
-        if (!instr->api_name) {
-            instr->api_name = (char*)"OS/2_API";
         }
     }
     else if (strcmp(insn->mnemonic, "call") == 0 || strcmp(insn->mnemonic, "jmp") == 0) {
@@ -253,13 +257,17 @@ int disasm_buffer(const uint8_t *code, size_t len, uint32_t start_addr,
             uint16_t target_seg = 0;
             uint16_t target_off = 0;
             if (sscanf(insn[i].op_str, "%hx,%hx", &target_seg, &target_off) == 2) {
-                const char *api_name = resolve_lcall_api(target_seg, target_off);
-                if (api_name) {
-                    instrs[i].api_name = (char*)api_name;
+                // Only tag as OS/2 API if the segment is a known call-gate selector
+                // (0xFFFF or 0xFFEF). Other far calls are user-code far calls.
+                int is_os2_call_gate = (target_seg == 0xFFFF || target_seg == 0xFFEF);
+                if (is_os2_call_gate) {
+                    const char *api_name = resolve_lcall_api(target_seg, target_off);
+                    if (api_name) {
+                        instrs[i].api_name = (char*)api_name;
+                    } else {
+                        instrs[i].api_name = (char*)"OS/2_API";
+                    }
                 }
-            }
-            if (!instrs[i].api_name) {
-                instrs[i].api_name = (char*)"OS/2_API";
             }
         }
         else if (strcmp(insn[i].mnemonic, "call") == 0 || strcmp(insn[i].mnemonic, "jmp") == 0) {
