@@ -474,7 +474,7 @@ void TSourceView::draw()
     int found = -1;
     if (g_dwarf.loaded) {
         found = dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
-                                    linearAddr, &filename, &currentLine,
+                                    linearAddr, cs, &filename, &currentLine,
                                     &srcSegment, &srcOffset);
     }
 

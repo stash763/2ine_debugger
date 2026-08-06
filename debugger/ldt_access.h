@@ -30,6 +30,7 @@ typedef struct {
     uint32_t is_32bit[LX_MAX_LDT_SLOTS];   // 1 if 32-bit segment, 0 if 16-bit
     uint32_t is_code[LX_MAX_LDT_SLOTS];    // 1 if code segment, 0 if data
     uint32_t limit[LX_MAX_LDT_SLOTS];      // Segment limit
+    uint16_t ne_segment[LX_MAX_LDT_SLOTS];  // NE segment number for each selector (0=none)
     int debugger_attached;
     pid_t debugger_pid;
     pid_t debuggee_pid;

@@ -960,7 +960,7 @@ const char *dwarf_get_file_name(int index)
 }
 
 int dwarf_linear_to_line(DebugSharedState *state, int is_lx_mode,
-                        uint32_t linear_addr,
+                        uint32_t linear_addr, uint16_t cs,
                         const char **filename, int *line,
                         uint16_t *out_segment, uint32_t *out_offset)
 {
@@ -981,52 +981,47 @@ int dwarf_linear_to_line(DebugSharedState *state, int is_lx_mode,
             }
         }
     } else {
-        /* NE mode: aranges address is offset within NE segment.
-         * The DWARF segment number (1, 3, etc.) is the NE segment table
-         * index, NOT the LDT slot index. The LDT slot is selector >> 3.
-         *
-         * For each LDT slot, compute offset = linear_addr - base.
-         * Then find the arange entry whose [address, address+length)
-         * contains that offset. If multiple aranges match (different NE
-         * segments can start at the same offset), prefer the one with
-         * the largest length (code segments are typically larger). */
+        /* NE mode: Use the current CS selector to find the exact NE segment.
+         * The loader populates ne_segment[slot] with the NE segment number. */
         if (!state)
             return -1;
 
-        int best_slot = -1;
-        int best_range = -1;
-        uint32_t best_len = 0;
+        int slot = cs >> 3;
+        if (slot < 0 || slot >= LX_MAX_LDT_SLOTS)
+            return -1;
+        uint32_t base = state->selectors[slot];
+        if (base == 0)
+            return -1;
+        if (linear_addr < base)
+            return -1;
+        uint32_t offset = linear_addr - base;
 
-        for (int slot = 0; slot < LX_MAX_LDT_SLOTS; slot++) {
-            uint32_t base = state->selectors[slot];
-            if (base == 0)
-                continue;
-
-            if (linear_addr < base) /* skip if address is below segment base */
-                continue;
-            uint32_t offset = linear_addr - base;
-
+        uint16_t ne_seg = state->ne_segment[slot];
+        if (ne_seg != 0) {
+            /* We know exactly which NE segment this selector maps to */
             for (int i = 0; i < g_dwarf.range_count; i++) {
-                uint32_t ar_addr = g_dwarf.ranges[i].address;
-                uint32_t ar_len = g_dwarf.ranges[i].length;
-
-                if (offset >= ar_addr && offset < ar_addr + ar_len) {
-                    if (ar_len > best_len) {
-                        best_len = ar_len;
-                        best_range = i;
-                        best_slot = slot;
+                if (g_dwarf.ranges[i].segment == ne_seg) {
+                    uint32_t ar_addr = g_dwarf.ranges[i].address;
+                    uint32_t ar_len = g_dwarf.ranges[i].length;
+                    if (offset >= ar_addr && offset < ar_addr + ar_len) {
+                        if (out_segment) *out_segment = ne_seg;
+                        if (out_offset) *out_offset = offset;
+                        return dwarf_addr_to_line(ne_seg, offset, filename, line);
                     }
                 }
             }
         }
 
-        if (best_range >= 0) {
-            uint32_t base = state->selectors[best_slot];
-            uint32_t offset = linear_addr - base;
-            uint16_t seg = g_dwarf.ranges[best_range].segment;
-            if (out_segment) *out_segment = seg;
-            if (out_offset) *out_offset = offset;
-            return dwarf_addr_to_line(seg, offset, filename, line);
+        /* Fallback: ne_segment not populated or offset out of range */
+        for (int i = 0; i < g_dwarf.range_count; i++) {
+            uint32_t ar_addr = g_dwarf.ranges[i].address;
+            uint32_t ar_len = g_dwarf.ranges[i].length;
+            if (offset >= ar_addr && offset < ar_addr + ar_len) {
+                uint16_t seg = g_dwarf.ranges[i].segment;
+                if (out_segment) *out_segment = seg;
+                if (out_offset) *out_offset = offset;
+                return dwarf_addr_to_line(seg, offset, filename, line);
+            }
         }
     }
 

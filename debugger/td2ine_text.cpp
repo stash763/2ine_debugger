@@ -453,8 +453,9 @@ void handleDebuggerCommand(void)
             fprintf(stderr, "\nNo DWARF debug info loaded.\n");
         } else {
             uint32_t linearAddr = (uint32_t)g_debug.regs.eip;
+            uint16_t cs = 0;
             if (!g_debug.is_lx_mode && g_debug.shared_state) {
-                uint16_t cs = (uint16_t)(
+                cs = (uint16_t)(
 #ifdef __i386__
                     g_debug.regs.xcs
 #else
@@ -469,7 +470,7 @@ void handleDebuggerCommand(void)
             uint16_t seg = 0;
             uint32_t off = 0;
             if (dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
-                                    linearAddr, &filename, &line, &seg, &off) == 0) {
+                                    linearAddr, cs, &filename, &line, &seg, &off) == 0) {
                 fprintf(stderr, "\nSource: %s:%d (seg=%u off=0x%04X)\n", filename ? filename : "?", line, seg, off);
                 char **srcLines = NULL;
                 int numLines = 0;
@@ -648,8 +649,9 @@ void runTextMode(void)
     /* Show initial source location if DWARF is loaded */
     if (g_dwarf.loaded) {
         uint32_t linearAddr = (uint32_t)g_debug.regs.eip;
+        uint16_t cs = 0;
         if (!g_debug.is_lx_mode && g_debug.shared_state) {
-            uint16_t cs = (uint16_t)(
+            cs = (uint16_t)(
 #ifdef __i386__
                 g_debug.regs.xcs
 #else
@@ -664,7 +666,7 @@ void runTextMode(void)
         uint16_t seg = 0;
         uint32_t off = 0;
         if (dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode,
-                                linearAddr, &filename, &line, &seg, &off) == 0) {
+                                linearAddr, cs, &filename, &line, &seg, &off) == 0) {
             fprintf(stderr, "\nSource: %s:%d (seg=%u off=0x%04X)\n", filename ? filename : "?", line, seg, off);
             char **srcLines = NULL;
             int numLines = 0;

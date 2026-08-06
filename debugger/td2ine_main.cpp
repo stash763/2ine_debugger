@@ -324,6 +324,21 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
            trace_calls_only ? ", trace-calls" : "",
            loop_detect ? ", loop-detect" : "");
 
+    // Track source file transitions
+    static char prev_filename[256];
+    prev_filename[0] = '\0';
+
+    // Debug: show DWARF aranges and LDT selectors
+    if (g_dwarf.loaded) {
+        printf("DWARF aranges (%d ranges):\n", g_dwarf.range_count);
+        for (int i = 0; i < g_dwarf.range_count; i++) {
+            printf("  range %d: seg=%u addr=%08X len=%08X\n", i,
+                   g_dwarf.ranges[i].segment,
+                   g_dwarf.ranges[i].address,
+                   g_dwarf.ranges[i].length);
+        }
+    }
+
     for (int step = 0; step < num_steps; step++) {
         struct user_regs_struct regs;
         memset(&regs, 0, sizeof(regs));
@@ -338,6 +353,14 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
         if (shared && is_16bit) {
             uint32_t linear = linearAddressFromSelectors(shared, cs, (uint16_t)(eip & 0xFFFF));
             if (linear) baseAddr = linear;
+            printf("  LDT: CS=%04X idx=%d base=%08X linear=%08X ne_seg=%u\n",
+                   cs, cs >> 3, shared->selectors[cs >> 3], linear, shared->ne_segment[cs >> 3]);
+            uint16_t ds = (uint16_t)(regs.xds & 0xFFFF);
+            uint16_t ss = (uint16_t)(regs.xss & 0xFFFF);
+            printf("  LDT: DS=%04X idx=%d base=%08X\n",
+                   ds, ds >> 3, shared->selectors[ds >> 3]);
+            printf("  LDT: SS=%04X idx=%d base=%08X\n",
+                   ss, ss >> 3, shared->selectors[ss >> 3]);
         }
 
         // Symbol lookup
@@ -493,6 +516,43 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
             }
         } else {
             printf("  ASM:   [memory read failed]\n");
+        }
+
+        // Display LLVM IR comment from DWARF debug info (if available)
+        if (g_dwarf.loaded) {
+            const char *filename = NULL;
+            int line = 0;
+            uint16_t seg = 0;
+            uint32_t off = 0;
+            int dw_rc = dwarf_linear_to_line(shared, g_debug.is_lx_mode, baseAddr, cs,
+                                       &filename, &line, &seg, &off);
+            if (dw_rc == 0) {
+                // Show source file transition (e.g., entering musl code)
+                const char *srcBase = filename ? strrchr(filename, '/') : NULL;
+                srcBase = srcBase ? srcBase + 1 : (filename ? filename : "?");
+                if (prev_filename[0] == '\0' || strcmp(prev_filename, srcBase) != 0) {
+                    printf("  >>> Source: %s <<<\n", srcBase);
+                    strncpy(prev_filename, srcBase, sizeof(prev_filename) - 1);
+                    prev_filename[sizeof(prev_filename) - 1] = '\0';
+                }
+                printf("  DWARF: %s:%d (seg=%u off=%04X)\n", filename ? filename : "?", line, seg, off);
+                char **srcLines = NULL;
+                int numLines = 0;
+                int src_rc = dwarf_get_source(filename, &srcLines, &numLines);
+                if (src_rc == 0) {
+                    if (line > 0 && line <= numLines) {
+                        const char *srcLine = srcLines[line - 1];
+                        printf("  %4d  %s\n", line, srcLine);
+                        // Look for IR comment in the assembly source line
+                        const char *irPos = strstr(srcLine, "; IR:");
+                        if (irPos) {
+                            printf("  IR:  %s\n", irPos);
+                        }
+                    }
+                }
+            } else {
+                printf("  DWARF: linear_to_line failed (rc=%d)\n", dw_rc);
+            }
         }
 
         // Display stack contents
@@ -850,6 +910,14 @@ int main(int argc, char **argv)
         symbol_map_load(symbol_map_file);
     }
 
+    /* Load DWARF debug info from the executable for source-level debugging */
+    if (dwarf_init(program) == 0 && g_dwarf.loaded) {
+        fprintf(stderr, "DWARF debug info loaded: %d lines, %d files, %d ranges\n",
+                g_dwarf.line_count, g_dwarf.file_count, g_dwarf.range_count);
+    } else {
+        fprintf(stderr, "No DWARF debug info found (or failed to load)\n");
+    }
+
     if (autostep_count > 0) {
         run_autostep(autostep_count, g_debug.pid, g_debug.shared_state, autostep_step_over, autostep_into_api,
                      trace_calls_only, loop_detect);
@@ -857,14 +925,6 @@ int main(int argc, char **argv)
         ldt_close_shared(g_debug.shared_state);
         dwarf_cleanup();
         return 0;
-    }
-
-    /* Load DWARF debug info from the executable for source-level debugging */
-    if (dwarf_init(program) == 0 && g_dwarf.loaded) {
-        fprintf(stderr, "DWARF debug info loaded: %d lines, %d files, %d ranges\n",
-                g_dwarf.line_count, g_dwarf.file_count, g_dwarf.range_count);
-    } else {
-        fprintf(stderr, "No DWARF debug info found (or failed to load)\n");
     }
 
     if (use_tui) {

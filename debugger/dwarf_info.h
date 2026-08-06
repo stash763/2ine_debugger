@@ -141,7 +141,7 @@ const char *dwarf_get_file_name(int index);
  * Returns 0 on match, -1 if no debug info or no match.
  */
 int dwarf_linear_to_line(DebugSharedState *state, int is_lx_mode,
-                         uint32_t linear_addr,
+                         uint32_t linear_addr, uint16_t cs,
                          const char **filename, int *line,
                          uint16_t *out_segment, uint32_t *out_offset);
 

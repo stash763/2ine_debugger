@@ -44,6 +44,7 @@ typedef struct DebugSharedState {
     uint32_t is_32bit[8192];
     uint32_t is_code[8192];
     uint32_t limit[8192];
+    uint16_t ne_segment[8192];
     int debugger_attached;
     pid_t debugger_pid;
     pid_t debuggee_pid;
@@ -2736,8 +2737,29 @@ static void segfault_catcher(int sig, siginfo_t *info, void *ctx)
     static int faults = 0;
     faults++;
     switch (faults) {
-        // !!! FIXME: case #1 should be a much more detailed crash dump.
-        case 1: fprintf(stderr, "SIGSEGV at addr=%p (eip=%p)\n", addr, (void *) ((ucontext_t *) ctx)->uc_mcontext.gregs[REG_EIP]); break;
+        case 1: {
+            greg_t *gregs = ((ucontext_t *) ctx)->uc_mcontext.gregs;
+            fprintf(stderr, "SIGSEGV at addr=%p (eip=%p)\n", addr, (void *) gregs[REG_EIP]);
+            fprintf(stderr, "  EAX=%p EBX=%p ECX=%p EDX=%p\n",
+                    (void*)gregs[REG_EAX], (void*)gregs[REG_EBX],
+                    (void*)gregs[REG_ECX], (void*)gregs[REG_EDX]);
+            fprintf(stderr, "  ESI=%p EDI=%p EBP=%p ESP=%p\n",
+                    (void*)gregs[REG_ESI], (void*)gregs[REG_EDI],
+                    (void*)gregs[REG_EBP], (void*)gregs[REG_ESP]);
+            fprintf(stderr, "  CS=%p DS=%p ES=%p SS=%p\n",
+                    (void*)gregs[REG_CS], (void*)gregs[REG_DS],
+                    (void*)gregs[REG_ES], (void*)gregs[REG_SS]);
+            // Dump a few stack words
+            uint32 *sp = (uint32*) gregs[REG_ESP];
+            fprintf(stderr, "  stack at ESP=%p:\n", (void*)sp);
+            for (int i = 0; i < 16; i++) {
+                if ((size_t)sp < 0x1000) break;  // avoid faulting on null SP
+                volatile uint32 *vsp = (volatile uint32*) sp;
+                uint32 val = vsp[i];
+                fprintf(stderr, "    [ESP+%02d] = %08x\n", i*4, val);
+            }
+            break;
+        }
         case 2: write(2, "SIGSEGV, aborting.\n", 19); break;
         default: break;
     } // switch
@@ -2830,6 +2852,22 @@ int main(int argc, char **argv, char **envp)
                 g_debug_state->is_32bit[i] = 0;  // Default to 16-bit for NE modules
                 g_debug_state->is_code[i] = 0;
                 g_debug_state->limit[i] = 0xFFFF;  // 64K limit for 16-bit segments
+            }
+
+            // Mark code segments and NE segment numbers based on module mmap properties
+            // Include main module (lxmod) which may not be in loaded_modules list
+            LxModule *mod_list[2] = { GLoaderState.loaded_modules, lxmod };
+            for (int list_idx = 0; list_idx < 2; list_idx++) {
+                for (LxModule *mod = mod_list[list_idx]; mod != NULL; mod = mod->next) {
+                    for (uint32_t i = 0; i < mod->num_mmaps; i++) {
+                        uint16_t selector = mod->mmaps[i].alias;
+                        if (selector != 0xFFFF && selector < LX_MAX_LDT_SLOTS) {
+                            int iscode = ((mod->mmaps[i].prot & PROT_EXEC) != 0);
+                            g_debug_state->is_code[selector] = iscode;
+                            g_debug_state->ne_segment[selector] = (uint16_t)(i + 1);  // NE segments are 1-based
+                        }
+                    }
+                }
             }
 
             // Populate API name table from loaded module exports
