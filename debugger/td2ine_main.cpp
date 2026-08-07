@@ -153,8 +153,51 @@ uint32_t calculateNextIP(DebugSharedState *shared, struct user_regs_struct *regs
         return linear_eip + instr.size;
     }
     
-    // Conditional jumps (JE, JNE, etc.): step to next instruction
+    // Conditional jumps (JE, JNE, JAE, etc.): check flags to determine taken/not-taken
     if (instr.mnemonic[0] == 'j' && instr.mnemonic[1] != 'm') {
+        // Parse jump target from op_str (Capstone resolves to absolute linear address)
+        char *endptr;
+        uint32_t jump_target = (uint32_t)strtoul(instr.op_str, &endptr, 0);
+
+        // Read flags from regs
+        uint32_t eflags = regs->eflags;
+        int CF = (eflags >> 0) & 1;
+        int ZF = (eflags >> 6) & 1;
+        int SF = (eflags >> 7) & 1;
+        int OF = (eflags >> 11) & 1;
+        int PF = (eflags >> 2) & 1;
+
+        // Determine if jump is taken based on mnemonic and flags
+        int taken = 0;
+        const char *m = instr.mnemonic;
+        if      (strcmp(m, "je") == 0 || strcmp(m, "jz") == 0)      taken = ZF;
+        else if (strcmp(m, "jne") == 0 || strcmp(m, "jnz") == 0)  taken = !ZF;
+        else if (strcmp(m, "jae") == 0 || strcmp(m, "jnc") == 0 || strcmp(m, "jge") == 0) taken = CF == 0;  // jge also checks SF==OF but for unsigned jae/jnc only CF
+        else if (strcmp(m, "jb") == 0 || strcmp(m, "jc") == 0 || strcmp(m, "jl") == 0)  taken = CF;  // jl also checks SF!=OF but for unsigned jb/jc only CF
+        else if (strcmp(m, "ja") == 0)   taken = (CF == 0 && ZF == 0);
+        else if (strcmp(m, "jbe") == 0)  taken = (CF || ZF);
+        else if (strcmp(m, "jg") == 0)  taken = (ZF == 0 && SF == OF);
+        else if (strcmp(m, "jle") == 0) taken = (ZF || SF != OF);
+        else if (strcmp(m, "js") == 0)   taken = SF;
+        else if (strcmp(m, "jns") == 0) taken = !SF;
+        else if (strcmp(m, "jo") == 0)  taken = OF;
+        else if (strcmp(m, "jno") == 0) taken = !OF;
+        else if (strcmp(m, "jp") == 0 || strcmp(m, "jpe") == 0)  taken = PF;
+        else if (strcmp(m, "jnp") == 0 || strcmp(m, "jpo") == 0)  taken = !PF;
+        else if (strcmp(m, "jecxz") == 0 || strcmp(m, "jcxz") == 0) taken = ((regs->ecx & 0xFFFF) == 0);
+        else {
+            // Unknown conditional jump: assume not taken (fall through)
+            taken = 0;
+        }
+
+        // For signed comparisons, jge/jl need SF==OF check, not just CF
+        // Correct jge and jl to use signed comparison
+        if (strcmp(m, "jge") == 0) taken = (SF == OF);
+        if (strcmp(m, "jl") == 0)  taken = (SF != OF);
+
+        if (taken && jump_target != 0) {
+            return jump_target;
+        }
         return linear_eip + instr.size;
     }
     
