@@ -253,7 +253,87 @@ static int parse_elf_sections(DwarfInfo *dwarf)
     return 0;
 }
 
-/* ---- Parse .debug_line section (Watcom extensions) ---- */
+/* ---- Parse .debug_line section (Watcom extensions, multiple compilation units) ---- */
+
+/* Parse a single compilation unit's prologue to extract file names.
+ * Returns the number of files in this unit. */
+static int count_unit_files(const unsigned char *unit_start, uint32_t total_length)
+{
+    uint16_t version = read_u16_le(unit_start + 4);
+    (void)version;
+    uint32_t prologue_length = read_u32_le(unit_start + 6);
+    uint8_t opcode_base = unit_start[14];
+
+    const unsigned char *p = unit_start + 10 + 5 + (opcode_base - 1);
+    const unsigned char *unit_end = unit_start + 4 + total_length;
+
+    /* Skip include directories */
+    while (p < unit_end && *p != 0)
+        p += strlen((const char *)p) + 1;
+    if (p < unit_end)
+        p++;
+
+    /* Count file names */
+    int file_count = 0;
+    const unsigned char *file_p = p;
+    while (file_p < unit_end && *file_p != 0) {
+        file_count++;
+        file_p += strlen((const char *)file_p) + 1;
+        while (file_p < unit_end && (*file_p & 0x80)) file_p++;
+        if (file_p < unit_end) file_p++;
+        while (file_p < unit_end && (*file_p & 0x80)) file_p++;
+        if (file_p < unit_end) file_p++;
+        while (file_p < unit_end && (*file_p & 0x80)) file_p++;
+        if (file_p < unit_end) file_p++;
+    }
+
+    (void)prologue_length;
+    return file_count;
+}
+
+/* Parse file names from a compilation unit and append to global list.
+ * Returns the number of files added, and fills file_map with local-to-global
+ * index mapping (file_map[0] is unused, file_map[1] maps local 1 to global). */
+static int parse_unit_files(const unsigned char *unit_start, uint32_t total_length,
+                            DwarfSrcFile **out_files, int *out_file_count,
+                            int *file_map, int max_local_files)
+{
+    uint32_t prologue_length = read_u32_le(unit_start + 6);
+    uint8_t opcode_base = unit_start[14];
+
+    const unsigned char *p = unit_start + 10 + 5 + (opcode_base - 1);
+    const unsigned char *unit_end = unit_start + 4 + total_length;
+
+    /* Skip include directories */
+    while (p < unit_end && *p != 0)
+        p += strlen((const char *)p) + 1;
+    if (p < unit_end)
+        p++;
+
+    /* Parse file names */
+    int local_idx = 0;
+    int global_idx = *out_file_count;
+    while (p < unit_end && *p != 0 && local_idx < max_local_files) {
+        const char *fname = (const char *)p;
+        p += strlen((const char *)p) + 1;
+        while (p < unit_end && (*p & 0x80)) p++;
+        if (p < unit_end) p++;
+        while (p < unit_end && (*p & 0x80)) p++;
+        if (p < unit_end) p++;
+        while (p < unit_end && (*p & 0x80)) p++;
+        if (p < unit_end) p++;
+
+        if (global_idx < max_local_files) {
+            out_files[0][global_idx].name = strdup(fname);
+            file_map[local_idx + 1] = global_idx + 1; /* 1-based global */
+            global_idx++;
+            local_idx++;
+        }
+    }
+
+    *out_file_count = global_idx;
+    return (int)prologue_length;
+}
 
 static int parse_debug_line(DwarfInfo *dwarf)
 {
@@ -263,252 +343,234 @@ static int parse_debug_line(DwarfInfo *dwarf)
     const unsigned char *data = dwarf->debug_line;
     const unsigned char *end = data + dwarf->debug_line_size;
 
-    /* Parse line number program header */
-    uint32_t total_length = read_u32_le(data);
-    if (total_length == 0 || data + 4 + total_length > end)
-        return -1;
+    /* Pass 1: Count total line entries and file names across all compilation units */
+    int total_line_count = 0;
+    int total_file_count = 0;
 
-    uint16_t version = read_u16_le(data + 4);
-    uint32_t prologue_length = read_u32_le(data + 6);
-    uint8_t min_instr_len = data[10];
-    (void)version;
-    int8_t line_base = (int8_t)data[12];
-    uint8_t line_range = data[13];
-    uint8_t opcode_base = data[14];
+    const unsigned char *cursor = data;
+    while (cursor + 4 <= end) {
+        uint32_t total_length = read_u32_le(cursor);
+        if (total_length == 0 || cursor + 4 + total_length > end)
+            break;
 
-    const unsigned char *std_opcode_lengths = data + 15;
+        uint8_t opcode_base = cursor[14];
+        total_file_count += count_unit_files(cursor, total_length);
 
-    /* Parse include directories and file names from prologue */
-    const unsigned char *p = data + 10 + 5 + (opcode_base - 1);
+        const unsigned char *std_opcode_lengths = cursor + 15;
+        const unsigned char *p = cursor + 10 + (uint32_t)read_u32_le(cursor + 6);
+        const unsigned char *prog_end = cursor + 4 + total_length;
 
-    /* Skip include directories */
-    while (p < end && *p != 0)
-        p += strlen((const char *)p) + 1;
-    if (p < end)
-        p++;  /* skip null terminator */
-
-    /* Parse file names */
-    int file_count = 0;
-    const unsigned char *file_p = p;
-    while (file_p < end && *file_p != 0) {
-        file_count++;
-        file_p += strlen((const char *)file_p) + 1;
-        /* Skip directory index, mod_time, length (ULEB128 each) */
-        while (file_p < end && (*file_p & 0x80)) file_p++;
-        if (file_p < end) file_p++;  /* skip low byte */
-        while (file_p < end && (*file_p & 0x80)) file_p++;
-        if (file_p < end) file_p++;
-        while (file_p < end && (*file_p & 0x80)) file_p++;
-        if (file_p < end) file_p++;
-    }
-
-    dwarf->file_names = (DwarfSrcFile *)calloc(file_count, sizeof(DwarfSrcFile));
-    if (!dwarf->file_names)
-        return -1;
-    dwarf->file_count = file_count;
-
-    /* Actually parse file names */
-    p = data + 10 + 5 + (opcode_base - 1);
-    /* Skip directories again */
-    while (p < end && *p != 0)
-        p += strlen((const char *)p) + 1;
-    if (p < end)
-        p++;
-
-    int idx = 0;
-    while (p < end && *p != 0 && idx < file_count) {
-        const char *fname = (const char *)p;
-        p += strlen((const char *)p) + 1;
-        /* Skip dir_idx, mod_time, length (ULEB128 each) */
-        while (p < end && (*p & 0x80)) p++;
-        if (p < end) p++;
-        while (p < end && (*p & 0x80)) p++;
-        if (p < end) p++;
-        while (p < end && (*p & 0x80)) p++;
-        if (p < end) p++;
-
-        dwarf->file_names[idx].name = strdup(fname);
-        idx++;
-    }
-    if (p < end)
-        p++;  /* skip null terminator */
-
-    /* Line program starts at: total_length(4) + version(2) + prologue_length(4) + prologue */
-    p = data + 10 + prologue_length;
-    const unsigned char *prog_end = data + 4 + total_length;
-
-    /* Count entries first */
-    int line_count = 0;
-    const unsigned char *count_p = p;
-    uint32_t address = 0;
-    uint16_t segment = 0;
-    int32_t line = 1;
-    int file = 1;
-    while (count_p < prog_end) {
-        uint8_t opcode = *count_p++;
-        if (opcode == 0) {
-            uint32_t len = read_uleb128((const unsigned char **)&count_p);
-            if (count_p >= prog_end) break;
-            uint8_t sub = *count_p++;
-            len--;
-            if (sub == DW_LNE_end_sequence) {
-                line_count++;
-            } else if (sub == DW_LNE_set_address) {
-                count_p += len;
-            } else if (sub == DW_LNE_WATCOM_set_segment_OLD ||
-                       sub == DW_LNE_WATCOM_set_segment) {
-                count_p += len;
+        /* Count line entries in this unit */
+        uint32_t address = 0;
+        uint16_t segment = 0;
+        int32_t line = 1;
+        int file = 1;
+        while (p < prog_end) {
+            uint8_t opcode = *p++;
+            if (opcode == 0) {
+                uint32_t len = read_uleb128((const unsigned char **)&p);
+                if (p >= prog_end) break;
+                uint8_t sub = *p++;
+                len--;
+                if (sub == DW_LNE_end_sequence) {
+                    total_line_count++;
+                } else if (sub == DW_LNE_set_address) {
+                    p += len;
+                } else if (sub == DW_LNE_WATCOM_set_segment_OLD ||
+                           sub == DW_LNE_WATCOM_set_segment) {
+                    p += len;
+                } else {
+                    p += len;
+                }
+            } else if (opcode < opcode_base) {
+                total_line_count++;
+                switch (opcode) {
+                case 1: break;
+                case 2: read_uleb128((const unsigned char **)&p); break;
+                case 3: read_sleb128((const unsigned char **)&p); break;
+                case 4: read_uleb128((const unsigned char **)&p); break;
+                case 5: read_uleb128((const unsigned char **)&p); break;
+                case 6: break;
+                case 7: break;
+                case 8: break;
+                case 9: p += 2; break;
+                default:
+                    for (int i = 0; i < std_opcode_lengths[opcode - 1]; i++)
+                        read_uleb128((const unsigned char **)&p);
+                    break;
+                }
             } else {
-                count_p += len;
+                total_line_count++;
             }
-        } else if (opcode < opcode_base) {
-            line_count++;  /* DW_LNS_copy and others produce entries */
-            switch (opcode) {
-            case 1: break;  /* copy */
-            case 2: read_uleb128((const unsigned char **)&count_p); break;
-            case 3: read_sleb128((const unsigned char **)&count_p); break;
-            case 4: read_uleb128((const unsigned char **)&count_p); break;
-            case 5: read_uleb128((const unsigned char **)&count_p); break;
-            case 6: break;
-            case 7: break;
-            case 8: break;
-            case 9: count_p += 2; break;
-            default:
-                for (int i = 0; i < std_opcode_lengths[opcode - 1]; i++)
-                    read_uleb128((const unsigned char **)&count_p);
-                break;
-            }
-        } else {
-            line_count++;  /* special opcode */
         }
+
+        cursor += 4 + total_length;
     }
 
-    if (line_count == 0)
+    if (total_file_count == 0)
         return 0;
 
-    dwarf->lines = (DwarfLineEntry *)calloc(line_count, sizeof(DwarfLineEntry));
-    if (!dwarf->lines) {
-        for (int i = 0; i < dwarf->file_count; i++)
-            free(dwarf->file_names[i].name);
-        free(dwarf->file_names);
-        dwarf->file_names = NULL;
-        dwarf->file_count = 0;
+    /* Allocate arrays */
+    dwarf->file_names = (DwarfSrcFile *)calloc(total_file_count, sizeof(DwarfSrcFile));
+    if (!dwarf->file_names)
         return -1;
+    dwarf->file_count = 0;
+
+    if (total_line_count > 0) {
+        dwarf->lines = (DwarfLineEntry *)calloc(total_line_count, sizeof(DwarfLineEntry));
+        if (!dwarf->lines) {
+            for (int i = 0; i < dwarf->file_count; i++)
+                free(dwarf->file_names[i].name);
+            free(dwarf->file_names);
+            dwarf->file_names = NULL;
+            dwarf->file_count = 0;
+            return -1;
+        }
+        dwarf->line_count = total_line_count;
     }
-    dwarf->line_count = line_count;
 
-    /* Parse line program for real */
-    address = 0;
-    segment = 0;
-    line = 1;
-    file = 1;
+    /* Pass 2: Parse all compilation units */
     int entry_idx = 0;
+    cursor = data;
+    while (cursor + 4 <= end) {
+        uint32_t total_length = read_u32_le(cursor);
+        if (total_length == 0 || cursor + 4 + total_length > end)
+            break;
 
-    while (p < prog_end && entry_idx < line_count) {
-        uint8_t opcode = *p++;
-        if (opcode == 0) {
-            /* Extended opcode */
-            uint32_t len = read_uleb128((const unsigned char **)&p);
-            uint8_t sub = *p++;
-            len--;
+        uint16_t version = read_u16_le(cursor + 4);
+        (void)version;
+        uint32_t prologue_length = read_u32_le(cursor + 6);
+        uint8_t min_instr_len = cursor[10];
+        int8_t line_base = (int8_t)cursor[12];
+        uint8_t line_range = cursor[13];
+        uint8_t opcode_base = cursor[14];
+        const unsigned char *std_opcode_lengths = cursor + 15;
 
-            if (sub == DW_LNE_end_sequence) {
-                dwarf->lines[entry_idx].segment = segment;
-                dwarf->lines[entry_idx].address = address;
-                dwarf->lines[entry_idx].line = line;
-                dwarf->lines[entry_idx].file = file;
-                dwarf->lines[entry_idx].end_sequence = 1;
-                entry_idx++;
-                address = 0;
-                segment = 0;
-                line = 1;
-                file = 1;
-                p += len;
-            } else if (sub == DW_LNE_set_address) {
-                if (len == 2)
-                    address = read_u16_le(p);
-                else if (len == 4)
-                    address = read_u32_le(p);
-                p += len;
-            } else if (sub == DW_LNE_WATCOM_set_segment_OLD ||
-                       sub == DW_LNE_WATCOM_set_segment) {
-                if (len == 2)
-                    segment = read_u16_le(p);
-                else if (len == 4)
-                    segment = (uint16_t)read_u32_le(p);
-                p += len;
+        /* Parse file names for this unit and build local-to-global file map */
+        int file_map[256];  /* local file index -> global file index (1-based) */
+        memset(file_map, 0, sizeof(file_map));
+        int unit_file_count = 0;
+        int global_file_start = dwarf->file_count;
+        parse_unit_files(cursor, total_length, &dwarf->file_names,
+                         &dwarf->file_count, file_map, 256);
+        unit_file_count = dwarf->file_count - global_file_start;
+
+        /* Line program starts at: total_length(4) + version(2) + prologue_length(4) + prologue */
+        const unsigned char *p = cursor + 10 + prologue_length;
+        const unsigned char *prog_end = cursor + 4 + total_length;
+
+        uint32_t address = 0;
+        uint16_t segment = 0;
+        int32_t line = 1;
+        int file = 1;
+        while (p < prog_end && entry_idx < total_line_count) {
+            uint8_t opcode = *p++;
+            if (opcode == 0) {
+                /* Extended opcode */
+                uint32_t len = read_uleb128((const unsigned char **)&p);
+                uint8_t sub = *p++;
+                len--;
+
+                if (sub == DW_LNE_end_sequence) {
+                    dwarf->lines[entry_idx].segment = segment;
+                    dwarf->lines[entry_idx].address = address;
+                    dwarf->lines[entry_idx].line = line;
+                    dwarf->lines[entry_idx].file = (file > 0 && file < 256) ? file_map[file] : file;
+                    dwarf->lines[entry_idx].end_sequence = 1;
+                    entry_idx++;
+                    address = 0;
+                    segment = 0;
+                    line = 1;
+                    file = 1;
+                    p += len;
+                } else if (sub == DW_LNE_set_address) {
+                    if (len == 2)
+                        address = read_u16_le(p);
+                    else if (len == 4)
+                        address = read_u32_le(p);
+                    p += len;
+                } else if (sub == DW_LNE_WATCOM_set_segment_OLD ||
+                           sub == DW_LNE_WATCOM_set_segment) {
+                    if (len == 2)
+                        segment = read_u16_le(p);
+                    else if (len == 4)
+                        segment = (uint16_t)read_u32_le(p);
+                    p += len;
+                } else {
+                    p += len;
+                }
+            } else if (opcode < opcode_base) {
+                /* Standard opcode */
+                switch (opcode) {
+                case 1: { /* DW_LNS_copy */
+                    dwarf->lines[entry_idx].segment = segment;
+                    dwarf->lines[entry_idx].address = address;
+                    dwarf->lines[entry_idx].line = line;
+                    dwarf->lines[entry_idx].file = (file > 0 && file < 256) ? file_map[file] : file;
+                    dwarf->lines[entry_idx].end_sequence = 0;
+                    entry_idx++;
+                    break;
+                }
+                case 2: { /* DW_LNS_advance_pc */
+                    uint32_t adv = read_uleb128((const unsigned char **)&p);
+                    address += adv * min_instr_len;
+                    break;
+                }
+                case 3: { /* DW_LNS_advance_line */
+                    int32_t adv = read_sleb128((const unsigned char **)&p);
+                    line += adv;
+                    break;
+                }
+                case 4: { /* DW_LNS_set_file */
+                    file = read_uleb128((const unsigned char **)&p);
+                    break;
+                }
+                case 5: { /* DW_LNS_set_column */
+                    read_uleb128((const unsigned char **)&p);
+                    break;
+                }
+                case 6: break;  /* negate_stmt */
+                case 7: break;  /* set_basic_block */
+                case 8: { /* const_add_pc */
+                    address += (opcode_base - 1) * min_instr_len;
+                    line += line_range;
+                    break;
+                }
+                case 9: { /* fixed_advance_pc */
+                    uint16_t val = read_u16_le(p);
+                    p += 2;
+                    address += val;
+                    break;
+                }
+                default:
+                    for (int i = 0; i < std_opcode_lengths[opcode - 1]; i++)
+                        read_uleb128((const unsigned char **)&p);
+                    break;
+                }
             } else {
-                p += len;
-            }
-        } else if (opcode < opcode_base) {
-            /* Standard opcode */
-            switch (opcode) {
-            case 1: { /* DW_LNS_copy */
+                /* Special opcode */
+                uint8_t adjusted = opcode - opcode_base;
+                int32_t line_incr = line_base + (adjusted % line_range);
+                uint32_t addr_incr = (adjusted / line_range) * min_instr_len;
+                line += line_incr;
+                address += addr_incr;
+
                 dwarf->lines[entry_idx].segment = segment;
                 dwarf->lines[entry_idx].address = address;
                 dwarf->lines[entry_idx].line = line;
-                dwarf->lines[entry_idx].file = file;
+                dwarf->lines[entry_idx].file = (file > 0 && file < 256) ? file_map[file] : file;
                 dwarf->lines[entry_idx].end_sequence = 0;
                 entry_idx++;
-                break;
             }
-            case 2: { /* DW_LNS_advance_pc */
-                uint32_t adv = read_uleb128((const unsigned char **)&p);
-                address += adv * min_instr_len;
-                break;
-            }
-            case 3: { /* DW_LNS_advance_line */
-                int32_t adv = read_sleb128((const unsigned char **)&p);
-                line += adv;
-                break;
-            }
-            case 4: { /* DW_LNS_set_file */
-                file = read_uleb128((const unsigned char **)&p);
-                break;
-            }
-            case 5: { /* DW_LNS_set_column */
-                read_uleb128((const unsigned char **)&p);
-                break;
-            }
-            case 6: break;  /* negate_stmt */
-            case 7: break;  /* set_basic_block */
-            case 8: { /* const_add_pc */
-                address += (opcode_base - 1) * min_instr_len;
-                line += line_range;
-                break;
-            }
-            case 9: { /* fixed_advance_pc */
-                uint16_t val = read_u16_le(p);
-                p += 2;
-                address += val;
-                break;
-            }
-            default:
-                for (int i = 0; i < std_opcode_lengths[opcode - 1]; i++)
-                    read_uleb128((const unsigned char **)&p);
-                break;
-            }
-        } else {
-            /* Special opcode */
-            uint8_t adjusted = opcode - opcode_base;
-            int32_t line_incr = line_base + (adjusted % line_range);
-            uint32_t addr_incr = (adjusted / line_range) * min_instr_len;
-            line += line_incr;
-            address += addr_incr;
-
-            dwarf->lines[entry_idx].segment = segment;
-            dwarf->lines[entry_idx].address = address;
-            dwarf->lines[entry_idx].line = line;
-            dwarf->lines[entry_idx].file = file;
-            dwarf->lines[entry_idx].end_sequence = 0;
-            entry_idx++;
         }
+
+        cursor += 4 + total_length;
     }
 
     return 0;
 }
 
-/* ---- Parse .debug_aranges (Watcom format) ---- */
+/* ---- Parse .debug_aranges (Watcom format, multiple compilation units) ---- */
 
 static int parse_debug_aranges(DwarfInfo *dwarf)
 {
@@ -518,72 +580,84 @@ static int parse_debug_aranges(DwarfInfo *dwarf)
     const unsigned char *data = dwarf->debug_aranges;
     const unsigned char *end = data + dwarf->debug_aranges_size;
 
-    uint32_t total_length = read_u32_le(data);
-    if (total_length == 0 || data + 4 + total_length > end)
-        return -1;
-
-    uint16_t version = read_u16_le(data + 4);
-    uint32_t debug_info_offset = read_u32_le(data + 6);
-    uint8_t addr_size = data[10];
-    uint8_t seg_size = data[11];
-    (void)version;
-    (void)debug_info_offset;
-
-    /* Watcom aranges: entries start right after 12-byte header */
-    const unsigned char *p = data + 12;
-    const unsigned char *unit_end = data + 4 + total_length;
-
-    /* Count entries first */
-    int range_count = 0;
-    const unsigned char *count_p = p;
-    while (count_p + addr_size + seg_size + addr_size <= unit_end) {
-        uint32_t addr = 0, seg = 0, len = 0;
-        for (int i = 0; i < addr_size; i++)
-            addr |= (uint32_t)count_p[i] << (8 * i);
-        count_p += addr_size;
-        for (int i = 0; i < seg_size; i++)
-            seg |= (uint32_t)count_p[i] << (8 * i);
-        count_p += seg_size;
-        for (int i = 0; i < addr_size; i++)
-            len |= (uint32_t)count_p[i] << (8 * i);
-        count_p += addr_size;
-        if (addr == 0 && seg == 0 && len == 0)
+    /* Pass 1: Count total ranges across all compilation units */
+    int total_range_count = 0;
+    const unsigned char *cursor = data;
+    while (cursor + 12 <= end) {
+        uint32_t total_length = read_u32_le(cursor);
+        if (total_length == 0 || cursor + 4 + total_length > end)
             break;
-        range_count++;
+
+        uint8_t addr_size = cursor[10];
+        uint8_t seg_size = cursor[11];
+        const unsigned char *p = cursor + 12;
+        const unsigned char *unit_end = cursor + 4 + total_length;
+
+        while (p + addr_size + seg_size + addr_size <= unit_end) {
+            uint32_t addr = 0, seg = 0, len = 0;
+            for (int i = 0; i < addr_size; i++)
+                addr |= (uint32_t)p[i] << (8 * i);
+            p += addr_size;
+            for (int i = 0; i < seg_size; i++)
+                seg |= (uint32_t)p[i] << (8 * i);
+            p += seg_size;
+            for (int i = 0; i < addr_size; i++)
+                len |= (uint32_t)p[i] << (8 * i);
+            p += addr_size;
+            if (addr == 0 && seg == 0 && len == 0)
+                break;
+            total_range_count++;
+        }
+
+        cursor += 4 + total_length;
     }
 
-    if (range_count == 0)
+    if (total_range_count == 0)
         return 0;
 
-    dwarf->ranges = (DwarfAddrRange *)calloc(range_count, sizeof(DwarfAddrRange));
+    dwarf->ranges = (DwarfAddrRange *)calloc(total_range_count, sizeof(DwarfAddrRange));
     if (!dwarf->ranges)
         return -1;
-    dwarf->range_count = range_count;
+    dwarf->range_count = total_range_count;
 
-    /* Parse for real */
+    /* Pass 2: Parse all ranges */
     int idx = 0;
-    while (p + addr_size + seg_size + addr_size <= unit_end && idx < range_count) {
-        uint32_t addr = 0, seg = 0, len = 0;
-        for (int i = 0; i < addr_size; i++)
-            addr |= (uint32_t)p[i] << (8 * i);
-        p += addr_size;
-        for (int i = 0; i < seg_size; i++)
-            seg |= (uint32_t)p[i] << (8 * i);
-        p += seg_size;
-        for (int i = 0; i < addr_size; i++)
-            len |= (uint32_t)p[i] << (8 * i);
-        p += addr_size;
-
-        if (addr == 0 && seg == 0 && len == 0)
+    cursor = data;
+    while (cursor + 12 <= end && idx < total_range_count) {
+        uint32_t total_length = read_u32_le(cursor);
+        if (total_length == 0 || cursor + 4 + total_length > end)
             break;
 
-        dwarf->ranges[idx].segment = (uint16_t)seg;
-        dwarf->ranges[idx].address = addr;
-        dwarf->ranges[idx].length = len;
-        idx++;
+        uint8_t addr_size = cursor[10];
+        uint8_t seg_size = cursor[11];
+        const unsigned char *p = cursor + 12;
+        const unsigned char *unit_end = cursor + 4 + total_length;
+
+        while (p + addr_size + seg_size + addr_size <= unit_end && idx < total_range_count) {
+            uint32_t addr = 0, seg = 0, len = 0;
+            for (int i = 0; i < addr_size; i++)
+                addr |= (uint32_t)p[i] << (8 * i);
+            p += addr_size;
+            for (int i = 0; i < seg_size; i++)
+                seg |= (uint32_t)p[i] << (8 * i);
+            p += seg_size;
+            for (int i = 0; i < addr_size; i++)
+                len |= (uint32_t)p[i] << (8 * i);
+            p += addr_size;
+
+            if (addr == 0 && seg == 0 && len == 0)
+                break;
+
+            dwarf->ranges[idx].segment = (uint16_t)seg;
+            dwarf->ranges[idx].address = addr;
+            dwarf->ranges[idx].length = len;
+            idx++;
+        }
+
+        cursor += 4 + total_length;
     }
 
-    return 0;
+   return 0;
 }
 
 /* ---- Load a source file into cache ---- */
@@ -595,37 +669,92 @@ static int load_source_file(const char *filename, SourceFile *sf)
      * 2. basename relative to program directory
      * 3. basename relative to program directory + "tests/asm/"
      * 4. basename relative to CWD
+     * 5. basename with .lo.asm substitution (musl linked objects)
+     * 6. TD2INE_ASM_PATH environment variable directories
      */
     char path[2048];
     const char *used_path = filename;
+
+    /* Derive basename and .lo.asm variant */
+    const char *base = strrchr(filename, '/');
+    if (base) base++;
+    else base = filename;
+
+    /* Build .lo.asm variant: replace .asm with .lo.asm */
+    char lo_base[256];
+    size_t blen = strlen(base);
+    if (blen > 4 && strcmp(base + blen - 4, ".asm") == 0) {
+        snprintf(lo_base, sizeof(lo_base), "%.*s.lo.asm", (int)(blen - 4), base);
+    } else {
+        lo_base[0] = '\0';
+    }
 
     /* Try as-is */
     FILE *f = fopen(filename, "r");
     if (f) {
         used_path = filename;
     } else {
-        /* Try relative to program directory */
-        const char *base = strrchr(filename, '/');
-        if (base) base++;
-        else base = filename;
+        /* Helper macro-like: try a path, if found goto found */
+#define TRY_PATH(fmt, ...) do { \
+    snprintf(path, sizeof(path), fmt, ##__VA_ARGS__); \
+    f = fopen(path, "r"); \
+    if (f) { used_path = path; goto found; } \
+} while(0)
 
+        /* Try relative to program directory */
         if (g_dwarf.prog_dir[0] != '\0') {
-            snprintf(path, sizeof(path), "%s/%s", g_dwarf.prog_dir, base);
-            f = fopen(path, "r");
-            if (f) { used_path = path; goto found; }
+            TRY_PATH("%s/%s", g_dwarf.prog_dir, base);
+            if (lo_base[0]) TRY_PATH("%s/%s", g_dwarf.prog_dir, lo_base);
+            TRY_PATH("%s/tests/asm/%s", g_dwarf.prog_dir, base);
         }
-        if (g_dwarf.prog_dir[0] != '\0') {
-            snprintf(path, sizeof(path), "%s/tests/asm/%s", g_dwarf.prog_dir, base);
-            f = fopen(path, "r");
-            if (f) { used_path = path; goto found; }
-        }
+        /* Try relative to CWD */
         if (base != filename) {
-            f = fopen(base, "r");
-            if (f) { used_path = base; goto found; }
+            TRY_PATH("%s", base);
+            if (lo_base[0]) TRY_PATH("%s", lo_base);
         }
-        snprintf(path, sizeof(path), "tests/asm/%s", base);
-        f = fopen(path, "r");
-        if (f) { used_path = path; goto found; }
+        TRY_PATH("tests/asm/%s", base);
+
+        /* Try TD2INE_ASM_PATH environment variable (colon-separated directories) */
+        const char *asm_path = getenv("TD2INE_ASM_PATH");
+        if (asm_path) {
+            char dir[512];
+            const char *p = asm_path;
+            while (*p) {
+                const char *colon = strchr(p, ':');
+                size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+                if (dlen > 0 && dlen < sizeof(dir)) {
+                    memcpy(dir, p, dlen);
+                    dir[dlen] = '\0';
+                    TRY_PATH("%s/%s", dir, base);
+                    if (lo_base[0]) TRY_PATH("%s/%s", dir, lo_base);
+                    /* Try recursive: dir/subdir/basename where subdir is from filename path */
+                    const char *slash = strrchr(filename, '/');
+                    if (slash) {
+                        const char *prev_slash = NULL;
+                        const char *scan = filename;
+                        while (scan < slash) {
+                            const char *next = strchr(scan, '/');
+                            if (!next || next >= slash) break;
+                            prev_slash = next;
+                            scan = next + 1;
+                        }
+                        if (prev_slash && prev_slash < slash) {
+                            char subdir[256];
+                            size_t slen = slash - prev_slash - 1;
+                            if (slen > 0 && slen < sizeof(subdir)) {
+                                memcpy(subdir, prev_slash + 1, slen);
+                                subdir[slen] = '\0';
+                                TRY_PATH("%s/%s/%s", dir, subdir, base);
+                                if (lo_base[0]) TRY_PATH("%s/%s/%s", dir, subdir, lo_base);
+                            }
+                        }
+                    }
+                }
+                if (!colon) break;
+                p = colon + 1;
+            }
+        }
+#undef TRY_PATH
     }
 
 found:

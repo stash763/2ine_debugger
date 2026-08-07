@@ -541,11 +541,13 @@ static void run_autostep(int num_steps, pid_t pid, DebugSharedState *shared, int
                 int src_rc = dwarf_get_source(filename, &srcLines, &numLines);
                 if (src_rc == 0) {
                     if (line > 0 && line <= numLines) {
-                        const char *srcLine = srcLines[line - 1];
+                       const char *srcLine = srcLines[line - 1];
                         printf("  %4d  %s\n", line, srcLine);
                         // Look for IR comment in the assembly source line
                         const char *irPos = strstr(srcLine, "; IR:");
                         if (irPos) {
+                            irPos += 5; // skip "; IR:"
+                            while (*irPos == ' ' || *irPos == '\t') irPos++;
                             printf("  IR:  %s\n", irPos);
                         }
                     }
