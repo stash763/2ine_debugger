@@ -853,8 +853,13 @@ int main(int argc, char **argv)
     g_debug.output_pipe_fd = -1;
     g_debug.verbose_step = 0;  // 0 = suppress step messages, 1 = show them
 
-    /* Unlink any stale SHM from previous runs, then let the loader create it */
+    /* Create SHM before starting debuggee so lx_loader can open it */
     shm_unlink(DEBUG_SHM_NAME);
+    g_debug.shared_state = ldt_open_shared(1);
+    if (!g_debug.shared_state) { fprintf(stderr, "Failed to create shared memory\n"); return 1; }
+    g_debug.shared_state->debugger_pid = getpid();
+    g_debug_shared = g_debug.shared_state;
+    fprintf(stderr, "SHM created by td2ine (debugger_pid=%d)\n", getpid());
 
     const char *program = NULL;
     int prog_idx = -1;
@@ -889,21 +894,13 @@ int main(int argc, char **argv)
 
     g_debug_pid = g_debug.pid;
 
-    /* Now open the SHM that the loader created - retry for up to 2 seconds */
+    /* SHM already created and connected — wait for loader to populate it */
     int shm_retries = 0;
-    for (shm_retries = 0; shm_retries < 20; shm_retries++) {
-        g_debug.shared_state = ldt_open_shared(0);
-        if (g_debug.shared_state) break;
+    for (shm_retries = 0; shm_retries < 300; shm_retries++) {
+        if (g_debug.shared_state->entry_eip != 0 || g_debug.shared_state->breakpoint_active) break;
         usleep(100000);  /* 100ms */
     }
-    if (!g_debug.shared_state) {
-        fprintf(stderr, "Failed to open shared memory after %d retries, trying create\n", shm_retries);
-        g_debug.shared_state = ldt_open_shared(1);
-    }
-    if (!g_debug.shared_state) { fprintf(stderr, "Failed to open shared memory\n"); return 1; }
-    g_debug.shared_state->debugger_pid = getpid();
-    g_debug_shared = g_debug.shared_state;
-    fprintf(stderr, "SHM opened OK after %d retries (debuggee_pid=%d, entry_eip=0x%08X, bp_active=%d, is_lx=%d)\n",
+    fprintf(stderr, "SHM connected after %d retries (debuggee_pid=%d, entry_eip=0x%08X, bp_active=%d, is_lx=%d)\n",
             shm_retries, g_debug.shared_state->debuggee_pid, g_debug.shared_state->entry_eip,
             g_debug.shared_state->breakpoint_active, g_debug.shared_state->is_lx_mode);
 

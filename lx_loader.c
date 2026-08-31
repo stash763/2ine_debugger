@@ -746,10 +746,10 @@ static void *lxAllocSegment(uint16 *selector, const int iscode)
     //  address with some bit twiddling.
     static size_t baseaddr = 136 * 1024 * 1024;  // just start at a random low address that (hopefully) doesn't overlap anything.
     const uint32 segmentsize = 0x10000;
-    void *segment = mmap((void *) baseaddr, segmentsize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (segment == ((void *) MAP_FAILED)) {
+    void *segment = mmap((void *) baseaddr, segmentsize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (segment == ((void *) MAP_FAILED) || segment != (void *) baseaddr) {
         FIXME("This could be more robust.");
-        fprintf(stderr, "Failed to mmap a 16-bit friendly memory segment.\n");
+        fprintf(stderr, "Failed to mmap a 16-bit friendly memory segment at %p.\n", (void *) baseaddr);
         return NULL;
     }
 
@@ -2795,10 +2795,17 @@ int main(int argc, char **argv, char **envp)
     // Check for debug mode early - create SHM so debugger can open it
     const char *debug_env = getenv("TD2INE_DEBUG");
     if (debug_env && debug_env[0] == '1') {
-        g_debug_state = ldt_open_shared(1);
+        // Try to open SHM created by td2ine first; if that fails, create our own
+        g_debug_state = ldt_open_shared(0);
+        if (!g_debug_state) {
+            g_debug_state = ldt_open_shared(1);
+            if (g_debug_state) {
+                memset(g_debug_state, 0, sizeof(DebugSharedState));
+            }
+        }
         if (g_debug_state) {
-            memset(g_debug_state, 0, sizeof(DebugSharedState));
-            fprintf(stderr, "[LOADER] Debug SHM created at %p\n", (void*)g_debug_state);
+            fprintf(stderr, "[LOADER] Debug SHM %s at %p\n",
+                    g_debug_state->debugger_pid ? "opened" : "created", (void*)g_debug_state);
         }
     }
     
