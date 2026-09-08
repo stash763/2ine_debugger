@@ -7,6 +7,9 @@
 #include "td2ine.h"
 #include "symbol_map.h"
 #include <sys/mman.h>
+#include <unistd.h>
+#include <time.h>
+#include <signal.h>
 
 #define Uses_TApplication
 #define Uses_TProgram
@@ -770,9 +773,14 @@ int main(int argc, char **argv)
     int autostep_count = 0;
     int autostep_step_over = 0;  // 0 = step into (default), 1 = step over
     int autostep_into_api = 0;  // 0 = step over OS/2 API calls (default), 1 = step into
-    int trace_calls_only = 0;  // 1 = only print calls/returns
-    int loop_detect = 0;        // 1 = detect loops in autostep
+   int trace_calls_only = 0;      // 1 = only print calls/returns
+    int loop_detect = 0;            // 1 = detect loops in autostep
     const char *symbol_map_file = NULL;
+    // Batch memory dumps (debuggee stopped at entry): --dump-linear 0xADDR:LEN
+    uint32_t dump_addrs[16]; uint32_t dump_lens[16]; int dump_count = 0;
+    // Run at native speed until PC hits this linear address: --break-linear 0xADDR
+    int have_break_linear = 0; uint32_t break_linear = 0;
+    int dump_ldt = 0;
     int real_argc = argc;
 
     for (int i = 1; i < argc; i++) {
@@ -805,9 +813,37 @@ int main(int argc, char **argv)
             trace_calls_only = 1;
             real_argc--;
         }
-        if (strcmp(argv[i], "--loop-detect") == 0) {
+       if (strcmp(argv[i], "--loop-detect") == 0) {
             loop_detect = 1;
-            real_argc--;
+        }
+        if (strcmp(argv[i], "--dump-ldt") == 0) {
+            dump_ldt = 1;
+            argv[i] = (char *) "";
+            real_argc -= 1;
+        }
+        if (strcmp(argv[i], "--dump-linear") == 0 && i + 1 < argc) {
+            uint32_t a = 0, l = 0;
+            if (sscanf(argv[i + 1], "%x:%x", &a, &l) == 2 && dump_count < 16) {
+                dump_addrs[dump_count] = a; dump_lens[dump_count] = l; dump_count++;
+            } else {
+                fprintf(stderr, "Error: --dump-linear expects 0xADDR:LEN\n");
+                return 1;
+            }
+            argv[i] = (char *) ""; argv[i + 1] = (char *) "";
+            i++;
+            real_argc -= 2;
+        }
+        if (strcmp(argv[i], "--break-linear") == 0 && i + 1 < argc) {
+            uint32_t a = 0;
+            if (sscanf(argv[i + 1], "%x", &a) == 1) {
+                have_break_linear = 1; break_linear = a;
+            } else {
+                fprintf(stderr, "Error: --break-linear expects 0xADDR\n");
+                return 1;
+            }
+            argv[i] = (char *) ""; argv[i + 1] = (char *) "";
+            i++;
+            real_argc -= 2;
         }
         if (strcmp(argv[i], "--symbols") == 0 && i + 1 < argc) {
             symbol_map_file = argv[i + 1];
@@ -825,6 +861,8 @@ int main(int argc, char **argv)
             if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
             if (strcmp(argv[i], "--trace-calls") == 0) continue;
             if (strcmp(argv[i], "--loop-detect") == 0) continue;
+            if (strcmp(argv[i], "--dump-linear") == 0 || strcmp(argv[i], "--break-linear") == 0) { i++; continue; }
+            if (strcmp(argv[i], "--dump-ldt") == 0) continue;
             if (strcmp(argv[i], "--symbols") == 0) { i++; continue; } // skip map file
             program = argv[i]; break;
         }
@@ -841,6 +879,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "  --autostep-into-api Step into OS/2 API calls (default: step over them)\n");
         fprintf(stderr, "  --trace-calls       Only print call/return instructions (with symbols)\n");
         fprintf(stderr, "  --loop-detect       Detect loops in autostep (repeated address sequences)\n");
+        fprintf(stderr, "  --dump-linear 0xADDR:LEN  Dump guest memory at entry stop (repeatable)\n");
+        fprintf(stderr, "  --break-linear 0xADDR     Run at native speed until PC hits ADDR, then report state\n");
         fprintf(stderr, "  --symbols <file>     Load wlink map file for symbol resolution\n");
         return 1;
     }
@@ -864,12 +904,15 @@ int main(int argc, char **argv)
     const char *program = NULL;
     int prog_idx = -1;
     for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '\0') continue; // blanked td2ine option
         if (strcmp(argv[i], "--test-step-over") == 0) continue;
         if (strcmp(argv[i], "--autostep") == 0) { i++; continue; } // skip the number too
         if (strcmp(argv[i], "--autostep-mode") == 0) { i++; continue; } // skip the mode too
         if (strcmp(argv[i], "--autostep-into-api") == 0) continue;
         if (strcmp(argv[i], "--trace-calls") == 0) continue;
         if (strcmp(argv[i], "--loop-detect") == 0) continue;
+        if (strcmp(argv[i], "--dump-linear") == 0 || strcmp(argv[i], "--break-linear") == 0) { i++; continue; }
+            if (strcmp(argv[i], "--dump-ldt") == 0) continue;
         if (strcmp(argv[i], "--symbols") == 0) { i++; continue; } // skip the map file
         program = argv[i];
         prog_idx = i;
@@ -884,6 +927,7 @@ int main(int argc, char **argv)
     if (prog_idx >= 0 && prog_idx < argc) {
         clean_argv[clean_argc++] = argv[prog_idx]; // program name
         for (int i = prog_idx + 1; i < argc; i++) {
+            if (argv[i][0] == '\0') continue; // blanked td2ine option
             clean_argv[clean_argc++] = argv[i];
         }
     }
@@ -958,6 +1002,152 @@ int main(int argc, char **argv)
                 g_dwarf.line_count, g_dwarf.file_count, g_dwarf.range_count);
     } else {
         fprintf(stderr, "No DWARF debug info found (or failed to load)\n");
+    }
+
+    // Batch memory dumps: run after --break-linear (if given), so the guest
+    // is stopped mid-run with loader-initialized memory (PIB, environment,
+    // command line) fully tiled and in place.
+    // Run at native speed until PC hits a linear address, then report state.
+    if (have_break_linear) {
+        uint8_t orig = 0;
+        if (ptrace_read_memory(g_debug.pid, (void *)(uintptr_t)break_linear, &orig, 1) != 0) {
+            fprintf(stderr, "break-linear: cannot read 0x%08X\n", break_linear);
+            return 1;
+        }
+        uint8_t int3 = 0xCC;
+        ptrace_write_memory(g_debug.pid, (void *)(uintptr_t)break_linear, &int3, 1);
+        fprintf(stderr, "break-linear: int3 at 0x%08X (orig %02X), continuing...\n", break_linear, orig);
+        ptrace(PTRACE_CONT, g_debug.pid, NULL, NULL);
+        int status;
+        time_t start = time(NULL);
+        for (;;) {
+            pid_t r = waitpid(g_debug.pid, &status, WNOHANG);
+            if (r == g_debug.pid) break;
+            if (time(NULL) - start > 120) {
+                fprintf(stderr, "break-linear: timed out after 120s (int3 not hit); dumping state\n");
+                ptrace(PTRACE_GETREGS, g_debug.pid, NULL, &g_debug.regs);
+                kill(g_debug.pid, SIGSTOP);
+                waitpid(g_debug.pid, &status, 0);
+                break;
+            }
+            usleep(1000);
+        }
+        ptrace_write_memory(g_debug.pid, (void *)(uintptr_t)break_linear, &orig, 1);
+        ptrace(PTRACE_GETREGS, g_debug.pid, NULL, &g_debug.regs);
+        // Back EIP off the int3 if we actually trapped on it
+        uint16_t cs = (uint16_t)(g_debug.regs.xcs & 0xFFFF);
+        uint32_t linear_eip = (uint32_t)g_debug.regs.eip;
+        if (!g_debug.is_lx_mode) {
+            uint32_t lin = linearAddressFromSelectors(g_debug.shared_state, cs, (uint16_t)(g_debug.regs.eip & 0xFFFF));
+            if (lin) linear_eip = lin;
+        }
+        if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP && linear_eip == break_linear + 1) {
+            if (g_debug.is_lx_mode) {
+                g_debug.regs.eip -= 1;
+            } else {
+                g_debug.regs.eip = (unsigned long)(g_debug.regs.eip - 1);
+            }
+            ptrace(PTRACE_SETREGS, g_debug.pid, NULL, &g_debug.regs);
+            linear_eip -= 1;
+        }
+        printf("=== break at 0x%08X (status sig=%d) ===\n", linear_eip,
+               WIFSTOPPED(status) ? WSTOPSIG(status) : 0);
+        printf("  EIP=%08X CS=%04X DS=%04X ES=%04X SS=%04X\n",
+               (uint32_t)g_debug.regs.eip, cs,
+               (uint16_t)(g_debug.regs.xds & 0xFFFF),
+               (uint16_t)(g_debug.regs.xes & 0xFFFF),
+               (uint16_t)(g_debug.regs.xss & 0xFFFF));
+        printf("  AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X BP=%04X SP=%04X\n",
+               (uint16_t)g_debug.regs.eax, (uint16_t)g_debug.regs.ebx,
+               (uint16_t)g_debug.regs.ecx, (uint16_t)g_debug.regs.edx,
+               (uint16_t)g_debug.regs.esi, (uint16_t)g_debug.regs.edi,
+               (uint16_t)g_debug.regs.ebp, (uint16_t)g_debug.regs.esp);
+        // Disassemble a few instructions at PC
+        for (int ins = 0; ins < 6; ins++) {
+            uint8_t code[32];
+            memset(code, 0, sizeof(code));
+            if (ptrace_read_memory(g_debug.pid, (void *)(uintptr_t)linear_eip, code, sizeof(code)) == 0) {
+                DisasmInstruction instr;
+                memset(&instr, 0, sizeof(instr));
+                disasm_instruction(code, linear_eip, &instr, !g_debug.is_lx_mode);
+                if (instr.size <= 0) break;
+                printf("  %08X: %-22s %s %s\n", linear_eip, "", instr.mnemonic, instr.op_str);
+                const char *filename = NULL; int line = 0; uint16_t seg = 0; uint32_t off = 0;
+                if (dwarf_linear_to_line(g_debug.shared_state, g_debug.is_lx_mode, linear_eip, cs,
+                                        &filename, &line, &seg, &off) == 0) {
+                    printf("    DWARF: %s:%d\n", filename ? filename : "?", line);
+                }
+                linear_eip += instr.size;
+            } else break;
+        }
+        // Stack dump
+        {
+            uint16_t sp = (uint16_t)g_debug.regs.esp;
+            uint32_t ss_base = 0;
+            ldt_get_selector_info(g_debug.shared_state, (uint16_t)(g_debug.regs.xss & 0xFFFF), &ss_base, NULL, NULL);
+            printf("  Stack (SS=%04X base=%08X SP=%04X):", (uint16_t)(g_debug.regs.xss & 0xFFFF), ss_base, sp);
+            for (int s = 0; s < 8; s++) {
+                uint8_t wb[2];
+                if (ptrace_read_memory(g_debug.pid, (void *)(uintptr_t)(ss_base + sp + s * 2), wb, 2) == 0)
+                    printf(" [%04X]=%02X%02X", sp + s * 2, wb[1], wb[0]);
+                else break;
+            }
+            printf("\n");
+        }
+        // Segment register bases (from the shared LDT)
+        {
+            uint16_t segs[4];
+            segs[0] = (uint16_t)(g_debug.regs.xcs & 0xFFFF);
+            segs[1] = (uint16_t)(g_debug.regs.xds & 0xFFFF);
+            segs[2] = (uint16_t)(g_debug.regs.xes & 0xFFFF);
+            segs[3] = (uint16_t)(g_debug.regs.xss & 0xFFFF);
+            printf("  Segments:");
+            const char *names[4] = { "CS", "DS", "ES", "SS" };
+            for (int s = 0; s < 4; s++) {
+                uint32_t base = 0;
+                ldt_get_selector_info(g_debug.shared_state, segs[s], &base, NULL, NULL);
+                printf(" %s=%04X->%08X", names[s], segs[s], base);
+            }
+            printf("\n");
+        }
+    }
+
+    if (dump_ldt) {
+        printf("=== LDT (non-zero tiles) ===\n");
+        for (int i = 0; i < 8192; i++) {
+            if (g_debug.shared_state->selectors[i] != 0) {
+                printf("  idx %4d (sel %04X): base=%08X ne_seg=%u\n",
+                       i, (i << 3) | 7, g_debug.shared_state->selectors[i],
+                       g_debug.shared_state->ne_segment[i]);
+            }
+        }
+    }
+    for (int d = 0; d < dump_count; d++) {
+        printf("=== dump 0x%08X len 0x%X ===\n", dump_addrs[d], dump_lens[d]);
+        uint32_t addr = dump_addrs[d], len = dump_lens[d];
+        while (len > 0) {
+            uint32_t chunk = (len > 16) ? 16 : len;
+            uint8_t buf[16];
+            memset(buf, 0, sizeof(buf));
+            if (ptrace_read_memory(g_debug.pid, (void *)(uintptr_t)addr, buf, chunk) != 0) {
+                printf("%08X: <unreadable>\n", addr);
+            } else {
+                printf("%08X: ", addr);
+                for (uint32_t i = 0; i < chunk; i++) printf("%02X ", buf[i]);
+                printf("|");
+                for (uint32_t i = 0; i < chunk; i++)
+                    printf("%c", (buf[i] >= 32 && buf[i] < 127) ? buf[i] : '.');
+                printf("|\n");
+            }
+            addr += chunk; len -= chunk;
+        }
+    }
+
+    if (have_break_linear || dump_ldt || dump_count > 0) {
+        disasm_cleanup();
+        ldt_close_shared(g_debug.shared_state);
+        dwarf_cleanup();
+        return 0;
     }
 
     if (autostep_count > 0) {
