@@ -128,7 +128,12 @@ pid_t start_debuggee(const char *program, char **argv)
                 exit(1);
             }
             char loader_path[2048]; snprintf(loader_path, sizeof(loader_path), "%s/lx_loader", cwd);
-            char *loader_args[] = { loader_path, (char *)program, NULL };
+            char *loader_args[130];
+            int la = 0;
+            loader_args[la++] = loader_path;
+            for (char **p = argv; *p && la < 129; p++)
+                loader_args[la++] = *p;
+            loader_args[la] = NULL;
             execvp(loader_args[0], loader_args);
         } else {
             ptrace(PTRACE_TRACEME, 0, NULL, NULL); raise(SIGSTOP); execvp(program, argv);
