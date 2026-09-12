@@ -62,6 +62,15 @@ static APIRET16 bridge16to32_Dos16FreeSeg(uint8 *args) {
     return Dos16FreeSeg(sel);
 }
 
+static APIRET16 bridge16to32_Dos16AllocHuge(uint8 *args) {
+    LX_NATIVE_MODULE_16BIT_BRIDGE_ARG(USHORT, flags);
+    LX_NATIVE_MODULE_16BIT_BRIDGE_ARG(USHORT, maxNumSeg);
+    LX_NATIVE_MODULE_16BIT_BRIDGE_PTRARG(PUSHORT, psel);
+    LX_NATIVE_MODULE_16BIT_BRIDGE_ARG(USHORT, size);
+    LX_NATIVE_MODULE_16BIT_BRIDGE_ARG(USHORT, numSeg);
+    return Dos16AllocHuge(numSeg, size, psel, maxNumSeg, flags);
+}
+
 static APIRET16 bridge16to32_Dos16GetHugeShift(uint8 *args) {
     LX_NATIVE_MODULE_16BIT_BRIDGE_PTRARG(PUSHORT, pcount);
     return Dos16GetHugeShift(pcount);
@@ -280,6 +289,7 @@ LX_NATIVE_MODULE_16BIT_SUPPORT()
     LX_NATIVE_MODULE_16BIT_API(Dos16AllocSeg)
     LX_NATIVE_MODULE_16BIT_API(Dos16ReallocSeg)
     LX_NATIVE_MODULE_16BIT_API(Dos16FreeSeg)
+    LX_NATIVE_MODULE_16BIT_API(Dos16AllocHuge)
     LX_NATIVE_MODULE_16BIT_API(Dos16GetHugeShift)
     LX_NATIVE_MODULE_16BIT_API(Dos16GetMachineMode)
     LX_NATIVE_MODULE_16BIT_API(Dos16Beep)
@@ -327,6 +337,7 @@ static int init16_doscalls(void) {
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16AllocSeg, 8)
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16ReallocSeg, 4)
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16FreeSeg, 2)
+        LX_NATIVE_INIT_16BIT_BRIDGE(Dos16AllocHuge, 12)
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16GetHugeShift, 4)
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16GetMachineMode, 4)
         LX_NATIVE_INIT_16BIT_BRIDGE(Dos16Beep, 4)
@@ -371,6 +382,7 @@ LX_NATIVE_MODULE_INIT({ if (!init16_doscalls()) return 0; })
     LX_NATIVE_EXPORT16(Dos16AllocSeg, 34),
     LX_NATIVE_EXPORT16(Dos16ReallocSeg, 38),
     LX_NATIVE_EXPORT16(Dos16FreeSeg, 39),
+    LX_NATIVE_EXPORT16(Dos16AllocHuge, 40),
     LX_NATIVE_EXPORT16(Dos16GetHugeShift, 41),
     LX_NATIVE_EXPORT16(Dos16GetMachineMode, 49),
     LX_NATIVE_EXPORT16(Dos16Beep, 50),

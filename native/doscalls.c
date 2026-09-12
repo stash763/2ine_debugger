@@ -3332,7 +3332,12 @@ APIRET16 Dos16GetMachineMode(PBYTE pmode)
 APIRET16 Dos16GetHugeShift(PUSHORT pcount)
 {
     TRACE_NATIVE("Dos16GetHugeShift(%p)", pcount);
-    *pcount = 0;  FIXME("maybe?");
+    if (!pcount) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    // 64KB tiles get contiguous LDT indices, so consecutive selectors of a
+    //  huge block differ by 8 == 1 << 3.
+    *pcount = 3;
     return NO_ERROR;
 } // Dos16GetHugeShift
 
@@ -3407,6 +3412,62 @@ APIRET16 Dos16AllocSeg(USHORT size, PUSHORT psel, USHORT flags)
     return NO_ERROR;
 } // Dos16AllocSeg
 
+// DosAllocHuge bookkeeping: number of segments in a huge block, indexed by
+//  the LDT index of the block's base selector. 0 = not a huge-block base.
+static uint16 huge_block_segs[LX_MAX_LDT_SLOTS];
+
+APIRET16 Dos16AllocHuge(USHORT numSeg, USHORT size, PUSHORT psel, USHORT maxNumSeg, USHORT flags)
+{
+    TRACE_NATIVE("Dos16AllocHuge(%u, %u, %p, %u, %u)", (uint) numSeg, (uint) size, psel, (uint) maxNumSeg, (uint) flags);
+    (void) maxNumSeg;  // we never grow blocks via DosReallocHuge.
+
+    if (psel == NULL) {
+        return ERROR_INVALID_PARAMETER;
+    } else if ((flags & 0xFFF0) != 0) {  // these bits are reserved and must be zero.
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    const uint32 segs = ((uint32) numSeg) + ((size != 0) ? 1 : 0);
+    if (segs == 0) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    // Allocate the whole chain. The 64KB tile model hands out contiguous LDT
+    //  indices (consecutive selectors differ by 8, i.e. DosGetHugeShift()==3),
+    //  which keeps a huge block a contiguous run of tiles for flat 32-bit
+    //  addressing. Enforce it; a gap would corrupt the flat pointer model.
+    uint16 first = 0xFFFF;
+    for (uint32 i = 0; i < segs; i++) {
+        uint16 sel = 0xFFFF;
+        void *addr = GLoaderState.allocSegment(&sel, 0);
+        if (!addr) {
+            assert(sel == 0xFFFF);
+            if (first != 0xFFFF) {
+                for (uint32 j = 0; j < i; j++) {
+                    GLoaderState.freeSegment((uint16) (first + j));
+                }
+            }
+            return ERROR_NOT_ENOUGH_MEMORY;
+        } else if (i == 0) {
+            first = sel;
+        } else if (sel != (uint16) (first + i)) {
+            FIXME("LDT indices not contiguous for huge block");
+            GLoaderState.freeSegment(sel);
+            for (uint32 j = 0; j < i; j++) {
+                GLoaderState.freeSegment((uint16) (first + j));
+            }
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+
+    assert(first < LX_MAX_LDT_SLOTS);
+    huge_block_segs[first] = (uint16) segs;
+
+    // like Dos16AllocSeg: hand out a selector, not the raw LDT index.
+    *psel = (USHORT) ((first << 3) | 7);
+    return NO_ERROR;
+} // Dos16AllocHuge
+
 APIRET16 Dos16ReallocSeg(USHORT size, USHORT sel)
 {
     TRACE_NATIVE("Dos16ReallocSeg(%u, %u)", (uint) size, (uint) sel);
@@ -3426,7 +3487,16 @@ APIRET16 Dos16FreeSeg(USHORT sel)
     FIXME("this needs to deal with reference counting and shared segments");
     // documentation says this is a selector (specifically: a segment only on
     //  DOS in the family mode API), but it looks like OS/2 wants a segment too.
-    GLoaderState.freeSegment(sel >> 3);
+    const uint16 index = sel >> 3;
+    if (huge_block_segs[index]) {  // base selector of a DosAllocHuge chain: free it all.
+        const uint16 segs = huge_block_segs[index];
+        huge_block_segs[index] = 0;
+        for (uint16 i = 0; i < segs; i++) {
+            GLoaderState.freeSegment((uint16) (index + i));
+        }
+    } else {
+        GLoaderState.freeSegment(index);
+    }
     return NO_ERROR;
 } // Dos16FreeSeg
 
